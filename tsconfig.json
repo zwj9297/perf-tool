@@ -1,0 +1,38 @@
+{
+  "compilerOptions": {
+    /* 包是 ESM，nodenext 让 TS 按 package.json 的 "type": "module" 决定产物格式，
+       同时强制相对导入写全 .js 后缀——这是 ESM 下唯一不会在运行时才暴露问题的设置 */
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "target": "es2023",
+    "lib": ["es2023"],
+    "types": ["node"],
+
+    /* 对外部输入从严。LLM 输出与 profile 文件都是不可信数据：
+       noUncheckedIndexedAccess 让 hotSpots[0] 这类访问必须显式处理 undefined，
+       正好对应 CLAUDE.md 里「外部输入不比模型输出更可信」那条约束 */
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+
+    /* ESM 正确性：verbatimModuleSyntax 要求类型导入写 import type，
+       否则会在产物里留下对不存在绑定的运行时导入 */
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+
+    /* inlineSources 是必需的，不是可选项：files 白名单只发布 dist/，
+       不带内联源码的 source map 会指向用户机器上不存在的文件，等于没有 */
+    "sourceMap": true,
+    "inlineSources": true,
+
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+
+    /* 本文件只负责类型检查，产物交给 tsconfig.build.json */
+    "noEmit": true
+  },
+  "include": ["src/**/*", "tests/**/*", "*.config.ts"]
+}

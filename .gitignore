@@ -1,0 +1,10 @@
+node_modules/
+dist/
+coverage/
+*.tgz
+
+# 本工具在目标项目里产出的计划与 profile 数据
+.perf/
+
+.DS_Store
+*.log

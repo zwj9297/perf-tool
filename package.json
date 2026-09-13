@@ -1,0 +1,61 @@
+{
+  "name": "@zwj9297/perf-tool",
+  "version": "0.1.0",
+  "description": "CLI for code performance analysis and improvement.",
+  "type": "module",
+  "bin": {
+    "perf": "./dist/cli/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "dev": "tsx src/cli/index.ts",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run typecheck && npm test"
+  },
+  "keywords": [
+    "performance",
+    "performance-analysis",
+    "profiling",
+    "optimization",
+    "code-analysis",
+    "cli",
+    "llm",
+    "ai"
+  ],
+  "license": "ISC",
+  "author": "zwj9297",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zwj9297/perf-tool.git"
+  },
+  "bugs": {
+    "url": "https://github.com/zwj9297/perf-tool/issues"
+  },
+  "homepage": "https://github.com/zwj9297/perf-tool#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.20.2",
+    "eslint": "^10.10.0",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.12.0",
+    "prettier": "^3.9.6",
+    "tsx": "^4.23.13",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.70.0",
+    "vitest": "^5.0.0"
+  }
+}

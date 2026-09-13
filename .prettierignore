@@ -1,0 +1,7 @@
+dist/
+coverage/
+
+# npm 自己生成并维护，格式化它只会在每次装包后制造无意义 diff
+package-lock.json
+
+*.tgz
