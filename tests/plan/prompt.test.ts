@@ -118,6 +118,18 @@ describe('两种模式共有的部分', () => {
     }
   })
 
+  it('都要求"每个独立问题一个 step"，并说明理由（逐 step 提交/回退）', () => {
+    for (const p of [
+      buildSystemPrompt(base),
+      buildSystemPrompt({ ...base, evidence: evidence() }),
+    ]) {
+      expect(p).toContain('每个独立的问题一个 step')
+      expect(p).toContain('逐个回退')
+      // 反向也要说清，否则会变成按文件过度拆分
+      expect(p).toContain('同一个问题的多处改动应当放在同一个 step 里')
+    }
+  })
+
   it('都说明工具是只读的、不能执行命令', () => {
     const p = buildSystemPrompt(base)
     expect(p).toContain('只读')
