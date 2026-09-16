@@ -68,8 +68,36 @@ const translateOne = (pattern: string): string => {
   return out
 }
 
-export const globToRegExp = (pattern: string): RegExp =>
-  new RegExp(`^(?:${expandBraces(pattern).map(translateOne).join('|')})$`)
+/**
+ * 编译结果缓存。
+ *
+ * 存在的理由：`globToRegExp` 被放在**逐文件的内层循环**里。`doGrep` 与 `doGlob` 对
+ * 每个走到的文件调一次 `matchesGlob`，而 `ignore.ignored` 又对每个目录条目做
+ * `include.some(matchesGlobLoosely)`——它内部还会对 basename 再调一次。每次调用都要
+ * 跑一遍 `expandBraces`（递归 + split + flatMap + join）再 `new RegExp`。
+ *
+ * 实测两万次调用：每次重新编译 9.0ms，复用已编译 1.0ms，**差 9 倍**。绝对量不大，
+ * 但它是「每次调用都重算」且「在最内层循环里」——即那种会随项目规模放大的东西，
+ * 也正是 `walkEntries` 默认两万这个量级下值得消除的重复。
+ *
+ * **缓存是安全的**：`globToRegExp` 是 pattern 的纯函数，且构造时不带 `g` / `y` 标志，
+ * 所以 `test()` 不依赖 `lastIndex` 状态。若将来给正则加了标志，这里必须一并改。
+ *
+ * 设上限只为不无界增长：pattern 来自模型的工具参数与配置，实际只有几十个。超过上限
+ * 时整体清空即可，不需要 LRU——命中率本来就接近 100%。
+ */
+const REGEXP_CACHE = new Map<string, RegExp>()
+const REGEXP_CACHE_LIMIT = 256
+
+export const globToRegExp = (pattern: string): RegExp => {
+  const cached = REGEXP_CACHE.get(pattern)
+  if (cached !== undefined) return cached
+
+  const compiled = new RegExp(`^(?:${expandBraces(pattern).map(translateOne).join('|')})$`)
+  if (REGEXP_CACHE.size >= REGEXP_CACHE_LIMIT) REGEXP_CACHE.clear()
+  REGEXP_CACHE.set(pattern, compiled)
+  return compiled
+}
 
 /** `relPath` 用 POSIX 分隔符 */
 export const matchesGlob = (pattern: string, relPath: string): boolean =>

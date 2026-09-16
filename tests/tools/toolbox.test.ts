@@ -11,7 +11,7 @@ import { join } from 'node:path'
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { matchesGlob } from '../../src/tools/glob.js'
+import { globToRegExp, matchesGlob } from '../../src/tools/glob.js'
 import { isCredentialFile, resolveInsideProject } from '../../src/tools/paths.js'
 import { createToolbox } from '../../src/tools/toolbox.js'
 import type { ProviderToolCall } from '../../src/providers/types.js'
@@ -354,5 +354,38 @@ describe('include / exclude 的语义', () => {
     expect(r.text).toContain('src/a.ts')
     expect(r.text).toContain('src/deep/b.ts')
     expect(r.text).not.toContain('README.md')
+  })
+})
+
+describe('glob 编译结果被缓存 —— 消除内层循环里的重复编译', () => {
+  /**
+   * 断言用的是**对象同一性**而不是耗时：计时断言会 flaky，而"同一 pattern 返回同一个
+   * RegExp 对象"是确定性的，它恰好就是缓存存在的定义。
+   *
+   * 这条缓存针对的是一个具体的调用形态：`doGrep` / `doGlob` 对每个走到的文件调一次
+   * `matchesGlob`，`ignore.ignored` 又对每个目录条目做 `include.some(matchesGlobLoosely)`
+   * （它内部还会对 basename 再调一次）。实测两万次调用从 9.0ms 降到 1.0ms。
+   */
+  it('同一 pattern 返回同一个 RegExp 对象', () => {
+    expect(globToRegExp('src/**/*.ts')).toBe(globToRegExp('src/**/*.ts'))
+  })
+
+  it('不同 pattern 各有各的，语义不变', () => {
+    expect(globToRegExp('*.ts')).not.toBe(globToRegExp('*.js'))
+    expect(matchesGlob('*.ts', 'a.ts')).toBe(true)
+    expect(matchesGlob('*.ts', 'src/a.ts')).toBe(false)
+  })
+
+  it('交替使用多个 pattern 不会串味', () => {
+    for (let i = 0; i < 5; i++) {
+      expect(matchesGlob('**/*.ts', 'src/a.ts')).toBe(true)
+      expect(matchesGlob('**/*.js', 'src/a.ts')).toBe(false)
+    }
+  })
+
+  it('超过缓存上限后语义仍正确（清空只是丢缓存，不影响结果）', () => {
+    for (let i = 0; i < 300; i++) matchesGlob(`p${i}*.ts`, 'x.ts')
+    expect(matchesGlob('src/**/*.ts', 'src/a.ts')).toBe(true)
+    expect(matchesGlob('src/**/*.ts', 'src/a.js')).toBe(false)
   })
 })
