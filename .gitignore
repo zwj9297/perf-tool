@@ -6,5 +6,10 @@ coverage/
 # 本工具在目标项目里产出的计划与 profile 数据
 .perf/
 
+# 本仓库自己 dogfood 用的配置。注意工具本身把 .perftoolrc.json 当作**可提交的项目
+# 配置**（目标项目里通常应当提交，好让团队共用），这里是本仓库的特例：这个 verify
+# 命令只对本机有意义。
+.perftoolrc.json
+
 .DS_Store
 *.log
