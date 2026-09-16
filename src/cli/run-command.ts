@@ -17,6 +17,7 @@ import {
   findStaleFiles,
 } from '../execute/apply.js'
 import { generateEdits, type GenerateResult } from '../execute/generate.js'
+import { checkFilesAreSafe } from '../execute/overlay.js'
 import {
   buildMergedDiffs,
   renderPatchText,
@@ -109,6 +110,29 @@ export const loadRunPlan = (projectRoot: string): PlanLoad => {
   if (plan.target === undefined || typeof plan.target.root !== 'string') {
     return { ok: false, reason: 'plan-invalid', message: `${path} 缺少 target.root` }
   }
+
+  // **每条 step 的 files 都必须合法。**
+  //
+  // 这不是多余的：`step.files` 的内容会被读出来送进模型 prompt，而这个文件**被设计成
+  // 允许人工编辑**——所以一份被改过、或随仓库分发过来的 plan，只要写上
+  // `['../../../../.ssh/id_rsa']` 或 `['.env']`，就能把该文件内容发到模型端点去。
+  // 在这里挡住比在下游挡好：用户拿到的是"哪个 step 引用了哪个非法路径"，而不是生成到
+  // 一半才失败。（`overlay` 内部也做了同样的校验，那是为了任何绕过本函数的调用方。）
+  for (const step of plan.steps) {
+    const files = Array.isArray(step?.files) ? step.files : []
+    const safety = checkFilesAreSafe(projectRoot, files)
+    if (!safety.ok) {
+      return {
+        ok: false,
+        reason: 'unsafe-path',
+        message:
+          `${path} 里步骤 ${step?.id ?? '(无 id)'} 引用了非法路径 ` +
+          `${JSON.stringify(safety.file)}：${safety.detail}\n` +
+          `step.files 必须是项目根内的相对路径，且不得是凭证类文件。`,
+      }
+    }
+  }
+
   return { ok: true, plan }
 }
 

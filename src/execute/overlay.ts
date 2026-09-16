@@ -65,16 +65,53 @@ export type Overlay = {
   changed(): OverlayFile[]
 }
 
+/**
+ * 校验一组待读/待写的路径全部合法。
+ *
+ * 存在的理由是一次真实的读写不对称：**写路径**（`attemptApply` → `resolvePatchPath`
+ * → `resolveInsideProject`）一直有 containment 与凭证黑名单校验，而**读路径**曾经是
+ * 裸的 `readFileSync`。而 `step.files` 来自 `.perf/plan.json`——那是个**被设计成允许
+ * 人工编辑**的文件。于是一份被改过、或随仓库分发过来的 plan，只要写上
+ * `step.files: ['../../../../.ssh/id_rsa']` 或 `['.env']`，就能把该文件的内容**发到
+ * 模型端点去**。第二条尤其严重：它直接推翻了「默认跳过凭证类文件」这个对外承诺。
+ *
+ * `resolveInsideProject` 同时负责三件事：拒绝绝对路径与 `..`、`fs.realpath` 之后
+ * 判 containment（软链绕过）、以及凭证黑名单。
+ */
+export const checkFilesAreSafe = (
+  projectRoot: string,
+  files: readonly string[],
+): { ok: true } | { ok: false; file: string; detail: string } => {
+  for (const f of files) {
+    const r = resolveInsideProject(projectRoot, f)
+    if (!r.ok) return { ok: false, file: f, detail: r.detail }
+  }
+  return { ok: true }
+}
+
 export const createOverlay = (projectRoot: string): Overlay => {
   const originals = new Map<string, string>()
   const currents = new Map<string, string>()
 
+  /**
+   * 解析成规范相对路径。**这是读取的唯一入口**——把校验放在这里（而非只放在调用方），
+   * 任何未来的调用方都不会因为忘了校验而绕过它。
+   *
+   * 它同时把软链解析成真实路径，所以同一文件经不同路径写进来会归一到同一个 key。
+   */
+  const canonical = (rel: string): string => {
+    const r = resolveInsideProject(projectRoot, rel)
+    if (!r.ok) throw new Error(`拒绝访问 ${JSON.stringify(rel)}：${r.detail}`)
+    return r.rel
+  }
+
   const load = (rel: string): string => {
-    const cached = originals.get(rel)
+    const key = canonical(rel)
+    const cached = originals.get(key)
     if (cached !== undefined) return cached
     // 读不出来就让上层失败（例如文件在生成期间被删了）
-    const text = readFileSync(join(projectRoot, rel), 'utf8')
-    originals.set(rel, text)
+    const text = readFileSync(join(projectRoot, key), 'utf8')
+    originals.set(key, text)
     return text
   }
 
@@ -84,19 +121,21 @@ export const createOverlay = (projectRoot: string): Overlay => {
     },
 
     current(rel: string): string {
-      const c = currents.get(rel)
-      return c ?? load(rel)
+      const key = canonical(rel)
+      const c = currents.get(key)
+      return c ?? load(key)
     },
 
     apply(rel: string, patchText: string): ApplyResult {
-      const before = currents.get(rel) ?? load(rel)
+      const key = canonical(rel)
+      const before = currents.get(key) ?? load(key)
       const result = applyPatchToContent(before, patchText)
-      if (result.ok) currents.set(rel, result.content)
+      if (result.ok) currents.set(key, result.content)
       return result
     },
 
     commit(rel: string, content: string): void {
-      currents.set(rel, content)
+      currents.set(canonical(rel), content)
     },
 
     changed(): OverlayFile[] {

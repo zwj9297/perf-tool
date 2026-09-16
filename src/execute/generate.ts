@@ -26,7 +26,13 @@ import { applyPatchToContent, splitByFile } from '../diff/apply.js'
 import type { Plan, Step } from '../plan/schema.js'
 import type { Provider, ProviderMessage, ProviderUsage } from '../providers/types.js'
 
-import { createOverlay, resolvePatchPath, type Overlay, type OverlayFile } from './overlay.js'
+import {
+  checkFilesAreSafe,
+  createOverlay,
+  resolvePatchPath,
+  type Overlay,
+  type OverlayFile,
+} from './overlay.js'
 
 export const SUBMIT_EDIT = 'submit_edit'
 export const SKIP_STEP = 'skip_step'
@@ -150,9 +156,10 @@ const userMessageOf = (plan: Plan, step: Step, overlay: Overlay): string => {
     .map((f) => {
       try {
         return renderFile(f, overlay.current(f))
-      } catch {
-        // 文件读不出来（生成期间被删了等），如实说，别让模型对着空内容编 diff
-        return `### ${f}\n（读不到这个文件，可能已不存在）`
+      } catch (e) {
+        // 如实说读不到，**并把真实原因带出来**：这里可能是文件被删了，也可能是
+        // overlay 拒绝了非法路径。含糊其辞会把一次安全拒绝伪装成"文件不存在"。
+        return `### ${f}\n（读不到这个文件：${e instanceof Error ? e.message : String(e)}）`
       }
     })
     .join('\n\n')
@@ -235,6 +242,17 @@ export const generateEdits = async (options: GenerateOptions): Promise<GenerateR
 
   for (const [index, step] of options.plan.steps.entries()) {
     options.onProgress?.(`\n[${index + 1}/${options.plan.steps.length}] ${step.title}\n`)
+
+    // 纵深防御：`step.files` 会被读出来送进 prompt，而它来自一个**允许人工编辑**的
+    // plan 文件。调用方（`loadRunPlan`）会先整体校验并给出更好的报错，这里再挡一道，
+    // 是为了任何绕过它的调用方，也为了把违规隔离在单个 step 内而不是丢掉整个计划。
+    const safety = checkFilesAreSafe(options.projectRoot, step.files)
+    if (!safety.ok) {
+      const reason = `step.files 含非法路径 ${JSON.stringify(safety.file)}：${safety.detail}`
+      skipped.push({ stepId: step.id, title: step.title, reason, attempts: 0 })
+      options.onProgress?.(`    跳过：${reason}\n`)
+      continue
+    }
 
     let done = false
     let attempts = 0

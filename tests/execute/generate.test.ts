@@ -429,16 +429,42 @@ describe('provider 失败与用量', () => {
     }
   })
 
-  it('文件读不到时如实告知，不编造内容', async () => {
+  it('step 引用的文件不合法/不存在时**直接跳过**，根本不问模型', async () => {
+    // 早先的行为是把"读不到这个文件"告诉模型，让它自行判断。现在在生成前就跳过：
+    // 对着一个看不见的文件让模型写 diff，等于请它编——而这里还有一种更硬的原因，
+    // 见 overlay 的读取校验（越界路径 / 凭证文件）。
     const { dir, clean } = makeProject({ 'src/a.txt': A })
     try {
-      const { conversations } = await run(
+      const { result, conversations } = await run(
         dir,
-        [skipTurn('读不到文件'), skipTurn('读不到文件'), skipTurn('读不到文件')],
+        [], // 一个响应都不准备：若它仍去问模型，测试会因"没有响应"而失败
         [{ id: 's1', files: ['src/missing.txt'] }],
       )
-      const msg = conversations[0]?.messages[0]
-      expect(msg?.role === 'user' && msg.text).toContain('读不到这个文件')
+      expect(conversations).toHaveLength(0)
+      expect(result.edits).toHaveLength(0)
+      expect(result.skipped[0]?.reason).toContain('不存在')
+      expect(result.skipped[0]?.attempts).toBe(0)
+    } finally {
+      clean()
+    }
+  })
+
+  it('越界路径的 step 被隔离，其它 step 照常生成', async () => {
+    const { dir, clean } = makeProject({ 'src/a.txt': A, 'src/b.txt': A })
+    try {
+      const { result, conversations } = await run(
+        dir,
+        [editTurn(patchFor('src/b.txt', A, 'echo'))],
+        [
+          { id: 's1', title: '越界', files: ['../../etc/passwd'] },
+          { id: 's2', title: '正常', files: ['src/b.txt'] },
+        ],
+      )
+      // 违规的 step 一次模型调用都没产生
+      expect(conversations).toHaveLength(1)
+      expect(result.skipped[0]?.stepId).toBe('s1')
+      expect(result.skipped[0]?.reason).toContain('非法路径')
+      expect(result.edits.map((e) => e.stepId)).toEqual(['s2'])
     } finally {
       clean()
     }

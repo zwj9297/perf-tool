@@ -468,3 +468,74 @@ describe('应用模式：确认、落盘、提交', () => {
     }
   })
 })
+
+describe('plan 文件里的路径也会被校验（它允许人工编辑，所以是不可信输入）', () => {
+  const planWithFiles = (root: string, files: string[]): Plan => ({
+    summary: 'x',
+    steps: [
+      {
+        id: 's1',
+        title: 't',
+        rationale: 'r',
+        files,
+        kind: 'config' as const,
+        risk: 'low' as const,
+      },
+    ],
+    target: { root, language: 'Text' },
+    grounded: false,
+  })
+
+  it('step.files 指到项目外 → 拒绝加载，并指出是哪个 step 与哪个路径', () => {
+    const { dir, clean } = makeProject()
+    try {
+      writePlan(dir, planWithFiles(dir, ['../../../../.ssh/id_rsa']))
+      const r = loadRunPlan(dir)
+      expect(r.ok).toBe(false)
+      expect(r.ok === false && r.reason).toBe('unsafe-path')
+      expect(r.ok === false && r.message).toContain('s1')
+      expect(r.ok === false && r.message).toContain('id_rsa')
+    } finally {
+      clean()
+    }
+  })
+
+  it('step.files 指向 .env → 拒绝（否则凭证会被送进模型 prompt）', () => {
+    const { dir, clean } = makeProject()
+    try {
+      writePlan(dir, planWithFiles(dir, ['.env']))
+      const r = loadRunPlan(dir)
+      expect(r.ok).toBe(false)
+      expect(r.ok === false && r.reason).toBe('unsafe-path')
+      expect(r.ok === false && r.message).toContain('凭证')
+    } finally {
+      clean()
+    }
+  })
+
+  it('绝对路径同样被拒', () => {
+    const { dir, clean } = makeProject()
+    try {
+      writePlan(dir, planWithFiles(dir, ['/etc/passwd']))
+      expect(loadRunPlan(dir).ok).toBe(false)
+    } finally {
+      clean()
+    }
+  })
+
+  it('合法路径照常通过，且在 `run` 里真的能走到生成那一步', async () => {
+    const { dir, clean } = makeProject()
+    try {
+      writePlan(dir, planWithFiles(dir, ['src/a.txt']))
+      expect(loadRunPlan(dir).ok).toBe(true)
+      const { outcome } = await run(
+        dir,
+        [editTurn(patchFor('src/a.txt', A, 'bravo'))],
+        planWithFiles(dir, ['src/a.txt']),
+      )
+      expect(outcome.ok).toBe(true)
+    } finally {
+      clean()
+    }
+  })
+})
