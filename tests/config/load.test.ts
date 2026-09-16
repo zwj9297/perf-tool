@@ -180,6 +180,28 @@ describe('上限的默认值与覆盖', () => {
     }
   })
 
+  it('verify 必须是字符串，且**光是配置它不会执行任何东西**（执行由 --verify 武装）', () => {
+    const { dir, clean } = withConfig(JSON.stringify({ verify: 'npm run typecheck && npm test' }))
+    try {
+      const { config } = load(dir, { env: {} })
+      expect(config.verify).toBe('npm run typecheck && npm test')
+      // 配置只是把命令带出来；跑不跑由 CLI 层的 --verify 决定
+    } finally {
+      clean()
+    }
+  })
+
+  it('verify 为空串时报错', () => {
+    const { dir, clean } = withConfig(JSON.stringify({ verify: '   ' }))
+    try {
+      const r = loadConfig({ projectRoot: dir, env: {} })
+      expect(r.ok).toBe(false)
+      expect(r.ok === false && r.detail).toContain('verify')
+    } finally {
+      clean()
+    }
+  })
+
   it('maxTokens 非法时报错', () => {
     for (const bad of [0, -1, 1.5, '400000']) {
       const { dir, clean } = withConfig(JSON.stringify({ maxTokens: bad }))

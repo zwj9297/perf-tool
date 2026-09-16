@@ -137,17 +137,33 @@ describe('前置条件：该拒绝的都拒绝，且不写出任何字节', () =
 
   it('缺少 git 身份（否则会在 checkout 出新分支之后才失败）', () => {
     const { dir, clean } = makeProject({ git: true, identity: false })
+    // **用环境变量把全局/系统配置隔离掉，绝不能写 `--global`。**
+    //
+    // 这条用例最初写成 `git config --global --unset user.email` —— 那是错的，而且
+    // 后果不只是测试不可靠：它**改动了开发者机器上的真实配置**，把一个从不恢复的
+    // 全局状态删掉了（本仓库 09-16 之后那批提交的作者邮箱从真实邮箱退化成
+    // `user@hostname` 兜底值，就是这条留下的痕迹）。何况 vitest 并行跑测试文件，
+    // 被删掉的全局身份还会让同批次其它用例的 git 提交失败——表现为间歇性失败。
+    //
+    // 指向 /dev/null 后，"没有身份"这件事是**构造**出来的，不依赖环境，也不需要
+    // 跳过分支。
+    const saved = {
+      global: process.env.GIT_CONFIG_GLOBAL,
+      system: process.env.GIT_CONFIG_SYSTEM,
+    }
+    process.env.GIT_CONFIG_GLOBAL = '/dev/null'
+    process.env.GIT_CONFIG_SYSTEM = '/dev/null'
     try {
-      // 清掉可能存在的全局身份，让这个用例确定
-      spawnSync('git', ['config', '--global', '--unset', 'user.email'], { cwd: dir })
       const r = checkPreconditions(dir, 'perf/x')
-      if (r.ok) {
-        // 环境里有全局身份时这个用例不成立，跳过而不是误报
-        expect(r.ok).toBe(true)
-        return
-      }
-      expect(r.reason).toBe('no-git-identity')
+      expect(r.ok).toBe(false)
+      expect(r.ok === false && r.reason).toBe('no-git-identity')
+      expect(r.ok === false && r.message).toContain('user.email')
     } finally {
+      // 恢复，别污染同一进程里的其它测试
+      if (saved.global === undefined) delete process.env.GIT_CONFIG_GLOBAL
+      else process.env.GIT_CONFIG_GLOBAL = saved.global
+      if (saved.system === undefined) delete process.env.GIT_CONFIG_SYSTEM
+      else process.env.GIT_CONFIG_SYSTEM = saved.system
       clean()
     }
   })
@@ -404,6 +420,130 @@ describe('正常应用', () => {
       expect(r.ok).toBe(true)
       expect(r.ok && r.commits).toEqual([])
       expect(git(dir, ['symbolic-ref', '--short', 'HEAD']).stdout).toBe('perf/none')
+    } finally {
+      clean()
+    }
+  })
+})
+
+describe('逐 step 验证：通过才提交', () => {
+  /**
+   * 门控点在**提交之前**，这样分支上只会累积可用的步骤，坏的那步不进历史。
+   *
+   * 这组用例的由来是实测：一份能干净 `git apply`、锚点全都定位准确的补丁，
+   * 仍有 2/7 个文件过不了 tsc、43/311 个测试失败。只验证可行性而不验证正确性，
+   * 产出就不能被信任。
+   */
+  const twoSteps = (): StepEdit[] => [
+    edit({ stepId: 's1', title: '第一步', snapshot: [{ rel: 'src/a.txt', content: V2 }] }),
+    edit({ stepId: 's2', title: '第二步', snapshot: [{ rel: 'src/a.txt', content: V3 }] }),
+  ]
+
+  it('未通过的 step 不提交、不进历史，并停止后续', () => {
+    const { dir, clean } = makeProject({ git: true })
+    try {
+      const startSha = git(dir, ['rev-parse', 'HEAD']).stdout
+      const r = applyEdits({
+        projectRoot: dir,
+        edits: twoSteps(),
+        merged: [merged({ current: V3 })],
+        branch: 'perf/verify',
+        verify: (step) =>
+          step.stepId === 's1' ? { ok: true } : { ok: false, output: 'tsc: 少了一个 import' },
+      })
+
+      expect(r.ok).toBe(false)
+      expect(r.ok === false && r.reason).toBe('verify-failed')
+      expect(r.ok === false && r.failedStep?.stepId).toBe('s2')
+      expect(r.ok === false && r.verifyOutput).toContain('少了一个 import')
+      expect(r.ok === false && r.message).toContain('未提交')
+
+      // 只有通过验证的第 1 步进了历史
+      expect(r.commits.map((c) => c.stepId)).toEqual(['s1'])
+      expect(git(dir, ['rev-list', '--count', `${startSha}..HEAD`]).stdout).toBe('1')
+
+      // 失败的那步**留在工作区**（未提交），供用户检查
+      expect(readFileSync(join(dir, 'src', 'a.txt'), 'utf8')).toBe(V3)
+      expect(git(dir, ['status', '--porcelain', '--untracked-files=no']).stdout).toContain(
+        'src/a.txt',
+      )
+    } finally {
+      clean()
+    }
+  })
+
+  it('失败报告给出丢弃与跳过两条出路', () => {
+    const { dir, clean } = makeProject({ git: true })
+    try {
+      const r = applyEdits({
+        projectRoot: dir,
+        edits: [edit()],
+        merged: [merged()],
+        branch: 'perf/vfail',
+        verify: () => ({ ok: false, output: 'boom' }),
+      })
+      const msg = r.ok === false ? r.message : ''
+      expect(msg).toContain('git checkout -- src/a.txt')
+      expect(msg).toContain('plan.json')
+    } finally {
+      clean()
+    }
+  })
+
+  it('全部通过时照常逐 step 提交', () => {
+    const { dir, clean } = makeProject({ git: true })
+    try {
+      const lines: string[] = []
+      const r = applyEdits({
+        projectRoot: dir,
+        edits: twoSteps(),
+        merged: [merged({ current: V3 })],
+        branch: 'perf/vok',
+        verify: () => ({ ok: true }),
+        onProgress: (t) => lines.push(t),
+      })
+
+      expect(r.ok).toBe(true)
+      expect(r.ok && r.commits.map((c) => c.stepId)).toEqual(['s1', 's2'])
+      expect(git(dir, ['rev-list', '--count', 'HEAD']).stdout).toBe('3') // init + 2
+      expect(readFileSync(join(dir, 'src', 'a.txt'), 'utf8')).toBe(V3)
+      expect(lines.join('')).toContain('验证通过')
+    } finally {
+      clean()
+    }
+  })
+
+  it('验证在**写出之后、提交之前**调用（看到的是这一步的磁盘状态）', () => {
+    const { dir, clean } = makeProject({ git: true })
+    try {
+      const seen: string[] = []
+      applyEdits({
+        projectRoot: dir,
+        edits: [edit({ snapshot: [{ rel: 'src/a.txt', content: V2 }] })],
+        merged: [merged()],
+        branch: 'perf/vorder',
+        verify: () => {
+          // 验证进行时，磁盘上应当已经是这一步的结果
+          seen.push(readFileSync(join(dir, 'src', 'a.txt'), 'utf8'))
+          return { ok: true }
+        },
+      })
+      expect(seen).toEqual([V2])
+    } finally {
+      clean()
+    }
+  })
+
+  it('不传 verify 时行为不变（默认不验证）', () => {
+    const { dir, clean } = makeProject({ git: true })
+    try {
+      const r = applyEdits({
+        projectRoot: dir,
+        edits: [edit()],
+        merged: [merged()],
+        branch: 'perf/vnone',
+      })
+      expect(r.ok && r.commits).toHaveLength(1)
     } finally {
       clean()
     }

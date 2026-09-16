@@ -1,12 +1,12 @@
 /**
- * `perf run` 的串联逻辑。
+ * `perf run` 的串联逻辑：生成改动 → 预览 → 确认 → 落盘提交。
  *
- * **当前只做三件事：生成改动 → 预览 → 可选导出 patch。绝不修改用户代码。**
+ * `--dry-run` 时到预览为止，绝不碰文件；`--emit-patch` 可以只导出补丁由用户自己应用。
  *
- * 这是刻意的半步。`execute/` 是整个工具里唯一会动用户源码的部分，所以先只做只读的
- * 那一半：真正落盘与 git 提交（分支、逐 step commit、失败回滚）留到第二步。这样
- * 危险面小得多，而且用户已经能拿到可直接 `git apply` 的 patch 自己动手。
+ * 流程里有一处顺序是刻意的：**所有"会拒绝"的检查都在问确认之前做完**（见下方注释），
+ * 否则用户读完 diff 点了 y 才被告知工作区是脏的，那次确认白问。
  */
+import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
 
@@ -24,9 +24,11 @@ import {
   renderPreview,
   renderStepDiffs,
 } from '../execute/preview.js'
-import { OUTPUT_DIR, PLAN_FILE } from './plan-command.js'
+import type { VerifyOutcome } from '../execute/apply.js'
 import type { Plan } from '../plan/schema.js'
 import type { Provider } from '../providers/types.js'
+
+import { OUTPUT_DIR, PLAN_FILE } from './plan-command.js'
 
 export type RunCommandInput = {
   /** **已 realpath 归一化**的项目根 */
@@ -44,6 +46,13 @@ export type RunCommandInput = {
   cwd: string
   /** 是否给 diff 上色（TTY 下更易读） */
   color: boolean
+  /**
+   * 逐 step 验证的命令（如 `npm run typecheck && npm test`），在项目根下执行。
+   *
+   * **只有调用方显式武装时才该传进来**（CLI 层由 `--verify` 控制）。配置里写了命令
+   * 不等于用户同意执行它——`.perftoolrc.json` 会随仓库一起被克隆。
+   */
+  verifyCommand?: string
   /**
    * 应用前的确认。**回调注入**，这样本模块仍可被测试，而真实的交互提示留在
    * CLI 层——那里才知道是不是 TTY、该怎么读标准输入。
@@ -152,6 +161,50 @@ export const checkPlanRoot = (
 
 const resolveEmitPath = (projectRoot: string, cwd: string, p: string): string =>
   isAbsolute(p) ? p : resolve(cwd, p)
+
+/** 验证命令的超时。跑测试可能慢，但不能无限等 */
+const VERIFY_TIMEOUT_MS = 600_000
+/** 报告里保留的验证输出长度。**取尾部**：tsc 与测试框架都把失败摘要打在最后 */
+const VERIFY_OUTPUT_TAIL = 4000
+
+const tailOf = (text: string): string =>
+  text.length <= VERIFY_OUTPUT_TAIL
+    ? text
+    : `…（前 ${text.length - VERIFY_OUTPUT_TAIL} 字符已略）\n${text.slice(-VERIFY_OUTPUT_TAIL)}`
+
+/**
+ * 逐 step 验证的执行器。
+ *
+ * 用 `shell: true` 是因为验证命令天然是 shell 形态（`a && b`）。这也意味着它是
+ * **任意代码执行**——所以它在 CLI 层必须由 `--verify` 显式武装，不能只靠配置文件。
+ */
+const makeVerify =
+  (projectRoot: string, command: string, write: (text: string) => void) =>
+  (step: { stepId: string; title: string; files: readonly string[] }): VerifyOutcome => {
+    write(`  验证中（${step.stepId}）：${command}\n`)
+    const r = spawnSync(command, {
+      cwd: projectRoot,
+      shell: true,
+      encoding: 'utf8',
+      timeout: VERIFY_TIMEOUT_MS,
+      maxBuffer: 16 * 1024 * 1024,
+    })
+    if (r.error !== undefined && r.error !== null) {
+      const e = r.error as NodeJS.ErrnoException
+      const kind =
+        e.code === 'ETIMEDOUT' ? `超时（超过 ${VERIFY_TIMEOUT_MS / 1000} 秒）` : e.message
+      return {
+        ok: false,
+        output: `${kind}\n${tailOf([r.stdout, r.stderr].filter(Boolean).join('\n'))}`,
+      }
+    }
+    if (r.status === 0) return { ok: true }
+    const out = [r.stdout, r.stderr].filter(Boolean).join('\n').trim()
+    return {
+      ok: false,
+      output: out === '' ? `命令以退出码 ${String(r.status)} 结束，没有输出` : tailOf(out),
+    }
+  }
 
 export const runRunCommand = async (
   input: RunCommandInput,
@@ -275,6 +328,9 @@ export const runRunCommand = async (
     merged: result.merged,
     branch,
     onProgress: deps.write,
+    ...(input.verifyCommand === undefined
+      ? {}
+      : { verify: makeVerify(input.projectRoot, input.verifyCommand, deps.write) }),
   })
 
   if (!applied.ok) {

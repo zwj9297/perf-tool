@@ -224,12 +224,29 @@ const runRun = async (options: CliOptions): Promise<number> => {
     return prepared.exitCode
   }
 
+  // `--verify` 是**武装**动作：命令来自配置，但只有显式传了这个 flag 才会执行。
+  // 理由是安全——`.perftoolrc.json` 会随仓库一起被克隆/分发，配置里写了命令不等于
+  // 用户同意执行它。这与 `--yes` 之于改用户代码是同一条原则。
+  let verifiedCommand = ''
+  if (options.verify) {
+    if (prepared.config.verify === undefined) {
+      err(
+        '--verify 需要在 .perftoolrc.json 里配好 verify 命令，' +
+          '例如 "verify": "npm run typecheck && npm test"。\n',
+      )
+      return EXIT_USAGE
+    }
+    verifiedCommand = prepared.config.verify
+    if (!options.json) err(`逐 step 验证：${verifiedCommand}\n`)
+  }
+
   const outcome = await runRunCommand(
     {
       projectRoot: prepared.root,
       plan: loaded.plan,
       byStep: options.byStep,
       mode: options.dryRun ? 'preview' : 'apply',
+      ...(options.verify ? { verifyCommand: verifiedCommand } : {}),
       ...(options.emitPatch === undefined ? {} : { emitPatch: options.emitPatch }),
       cwd: process.cwd(),
       color: process.stdout.isTTY === true,

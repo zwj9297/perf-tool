@@ -23,6 +23,7 @@ export const USAGE = `perf — 代码性能分析与优化
   --emit-patch <file>       run: 把可直接 git apply 的 patch 写到该路径
   --dry-run                 run: 只看不写，绝不修改任何文件
   -y, --yes                 run: 跳过确认直接应用（非交互环境必需）
+  --verify                  run: 启用配置里的 verify 命令，逐 step 验证后才提交
   -h, --help                显示帮助
 
 配置优先级: 命令行 flag > 环境变量 > .perftoolrc.json > 默认值
@@ -38,6 +39,13 @@ run 的前置条件（不满足会直接拒绝，不会静默降级）:
   - 生成期间这些文件没有被别处改动过
 
 run 会新建分支 perf/<时间戳>-<摘要>，每个步骤一个提交，可单独 revert。
+
+逐 step 验证（可选，默认关）:
+  在 .perftoolrc.json 里写 "verify": "npm run typecheck"，再带 --verify 运行。
+  每个 step 写出后先跑它，**通过才提交**——分支上只会累积可用的步骤。
+  验证不通过会停下并报告是哪一步，失败的那个改动留在工作区未提交供你检查。
+  命令由配置提供、由 --verify 武装：.perftoolrc.json 会随仓库一起被克隆，
+  所以配置里写了命令不等于你同意执行它。
 失败时会报告已完成到哪一步，并给出 git reset / branch -D 的回退命令。
 
 退出码:
@@ -73,6 +81,8 @@ export type CliOptions = {
   dryRun: boolean
   /** `perf run`：跳过确认直接应用（非交互环境必需） */
   yes: boolean
+  /** `perf run`：启用配置里的 verify 命令逐 step 验证（必须显式开，见配置说明） */
+  verify: boolean
 }
 
 export type ParseResult = { ok: true; options: CliOptions } | { ok: false; error: string }
@@ -101,6 +111,7 @@ export const parseArgs = (argv: readonly string[]): ParseResult => {
     byStep: false,
     dryRun: false,
     yes: false,
+    verify: false,
   }
 
   let commandSeen = false
@@ -132,6 +143,11 @@ export const parseArgs = (argv: readonly string[]): ParseResult => {
 
     if (token === '--yes' || token === '-y') {
       options.yes = true
+      continue
+    }
+
+    if (token === '--verify') {
+      options.verify = true
       continue
     }
 

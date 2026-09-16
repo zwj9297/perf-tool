@@ -48,7 +48,13 @@ const gitValue = (cwd: string, args: string[]): string | undefined => {
 const SHA_RE = /^[0-9a-f]{40}$/
 
 export type PreconditionFailure =
-  'not-a-repo' | 'dirty-worktree' | 'no-git-identity' | 'branch-exists' | 'stale-baseline'
+  | 'not-a-repo'
+  | 'dirty-worktree'
+  | 'no-git-identity'
+  | 'branch-exists'
+  | 'stale-baseline'
+  /** 某一步写出去之后没通过逐 step 验证 */
+  | 'verify-failed'
 
 export type Precondition =
   | {
@@ -192,6 +198,10 @@ export type AppliedCommit = {
   files: string[]
 }
 
+export type AppliedStepRef = { stepId: string; title: string; files: readonly string[] }
+
+export type VerifyOutcome = { ok: true } | { ok: false; output: string }
+
 export type ApplyResult =
   | {
       ok: true
@@ -209,6 +219,10 @@ export type ApplyResult =
       startSha?: string
       startBranch?: string
       commits: AppliedCommit[]
+      /** 未通过验证的那一步（reason 为 verify-failed 时有值） */
+      failedStep?: AppliedStepRef
+      /** 验证命令的输出，截断后的（reason 为 verify-failed 时有值） */
+      verifyOutput?: string
     }
 
 const revertHint = (r: { startSha?: string; startBranch?: string; branch?: string }): string => {
@@ -225,6 +239,17 @@ export type ApplyOptions = {
   /** 生成阶段的最终状态，用来校验基线 */
   merged: readonly OverlayFile[]
   branch: string
+  /**
+   * 逐 step 验证。**在写出这一步的文件之后、提交之前调用；通过才提交。**
+   *
+   * 为什么门控在提交上：这样分支上**只会累积可用的步骤**，坏的那步根本没进历史。
+   * 而"改动能应用"与"改动是对的"是两件事——实测过：一份能干净 `git apply`、
+   * 每一处锚点都定位准确的补丁，仍有 2/7 个文件过不了 tsc、43/311 个测试失败。
+   * 只验证可行性而不验证正确性，产出就不能被信任。
+   *
+   * 由调用方注入（而不是在这里 spawn），是为了让本模块保持纯粹、可测。
+   */
+  verify?: (step: AppliedStepRef) => VerifyOutcome
   onProgress?: (text: string) => void
 }
 
@@ -290,6 +315,35 @@ export const applyEdits = (options: ApplyOptions): ApplyResult => {
     }
 
     const files = edit.snapshot.map((s) => s.rel)
+
+    if (options.verify !== undefined) {
+      const verdict = options.verify({ stepId: edit.stepId, title: edit.title, files })
+      if (!verdict.ok) {
+        // **不提交**，并且**停下**。
+        //
+        // 不停的话，后面那些 step 的 diff 是针对「含这一步」的预测态生成的，而这步
+        // 没落地——继续跑只会得到一堆误导性的"锚点对不上"，掩盖真正的原因。
+        //
+        // 失败的那步**留在工作区、不撤销**：验证的价值就在于让用户知道哪里坏了，
+        // 而最快的排查方式就是让代码留在原处可以看。分支本身仍然是干净的。
+        return {
+          ok: false,
+          reason: 'verify-failed',
+          message:
+            `步骤 ${edit.stepId}（${edit.title}）未通过验证，已停止。\n` +
+            `它的改动**未提交**，留在工作区供你检查。\n` +
+            `  丢弃它：git checkout -- ${files.join(' ')}\n` +
+            `  想跳过这一步：编辑 .perf/plan.json 去掉它，再重跑。\n\n` +
+            `验证输出：\n${verdict.output}`,
+          ...ctx,
+          commits,
+          failedStep: { stepId: edit.stepId, title: edit.title, files },
+          verifyOutput: verdict.output,
+        }
+      }
+      options.onProgress?.(`  验证通过\n`)
+    }
+
     const add = git(projectRoot, ['add', '--', ...files])
     if (add.status !== 0) return fail('commit-failed', `git add 失败：${add.stderr}`, true)
 

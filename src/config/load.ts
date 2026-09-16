@@ -20,6 +20,14 @@ export type Config = {
   maxTokens: number
   /** 相对项目根的 profile 路径，或绝对路径 */
   profile?: string
+  /**
+   * 逐 step 验证用的命令，在项目根下执行（如 `npm run typecheck && npm test`）。
+   *
+   * **光配它不会执行任何东西**——必须再加 `--verify`。理由是安全：`.perftoolrc.json`
+   * 会随仓库一起被克隆/分发，所以"配置里写了命令"与"用户同意执行它"必须是两件事。
+   * 这与 `--yes` 之于改用户代码是同一条原则。
+   */
+  verify?: string
 }
 
 /*
@@ -31,6 +39,7 @@ export type Config = {
 
 export type ConfigFlags = {
   model?: string
+  verify?: string
   include?: string[]
   exclude?: string[]
   maxRounds?: number
@@ -127,6 +136,12 @@ const parseFileConfig = (raw: unknown): FileConfig | string => {
     if (typeof raw.profile !== 'string' || raw.profile === '') return 'profile 必须是非空字符串'
     out.profile = raw.profile
   }
+  if (raw.verify !== undefined) {
+    if (typeof raw.verify !== 'string' || raw.verify.trim() === '') {
+      return 'verify 必须是非空字符串'
+    }
+    out.verify = raw.verify
+  }
   // evidence.profile 是 README 里写的形态，也接受
   if (raw.evidence !== undefined) {
     if (!isRecord(raw.evidence)) return 'evidence 必须是对象'
@@ -164,6 +179,7 @@ const merge = (base: ConfigFlags, over: ConfigFlags): ConfigFlags => {
   if (over.maxRounds !== undefined) out.maxRounds = over.maxRounds
   if (over.maxTokens !== undefined) out.maxTokens = over.maxTokens
   if (over.profile !== undefined) out.profile = over.profile
+  if (over.verify !== undefined) out.verify = over.verify
   if (over.include !== undefined) out.include = over.include
   if (over.exclude !== undefined) out.exclude = over.exclude
   return out
@@ -221,6 +237,7 @@ export const loadConfig = (input: LoadConfigInput): ConfigResult => {
     maxTokens: merged.maxTokens ?? DEFAULT_MAX_TOKENS,
   }
   if (merged.profile !== undefined) config.profile = merged.profile
+  if (merged.verify !== undefined) config.verify = merged.verify
 
   if (origins.length > 0) notes.push(`覆盖来源：${origins.join('，')}`)
   return { ok: true, config, notes }
