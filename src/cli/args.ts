@@ -16,7 +16,8 @@ export const USAGE = `perf — 代码性能分析与优化
   --model <provider/id>     模型标识，如 anthropic/claude-sonnet-5
   --include <glob>          只分析匹配的文件，可重复
   --exclude <glob>          排除匹配的文件，可重复
-  --max-rounds <n>          探索轮数上限
+  --max-rounds <n>          探索轮数上限（廉价兜底）
+  --max-tokens <n>          累计输入 token 上限（真正起作用的成本上限）
   --json                    plan: 把计划以 JSON 打到标准输出
   --by-step                 run: 按步骤展示增量 diff，而非合并 diff
   --emit-patch <file>       run: 把可直接 git apply 的 patch 写到该路径
@@ -25,7 +26,7 @@ export const USAGE = `perf — 代码性能分析与优化
   -h, --help                显示帮助
 
 配置优先级: 命令行 flag > 环境变量 > .perftoolrc.json > 默认值
-环境变量:   PERF_MODEL / PERF_MAX_ROUNDS / PERF_PROFILE
+环境变量:   PERF_MODEL / PERF_MAX_ROUNDS / PERF_MAX_TOKENS / PERF_PROFILE
 
 产物:
   .perf/plan.json           优化计划（可人工编辑后再执行）
@@ -61,6 +62,8 @@ export type CliOptions = {
   include: string[]
   exclude: string[]
   maxRounds?: number
+  /** 累计输入 token 上限 */
+  maxTokens?: number
   json: boolean
   /** `perf run`：按 step 展示增量而非合并 diff */
   byStep: boolean
@@ -83,6 +86,7 @@ const VALUE_FLAGS = new Set([
   '--include',
   '--exclude',
   '--max-rounds',
+  '--max-tokens',
   '--emit-patch',
 ])
 /** 可重复的 flag */
@@ -165,6 +169,14 @@ export const parseArgs = (argv: readonly string[]): ParseResult => {
             return { ok: false, error: `--max-rounds 需要正整数，收到 ${value}` }
           }
           options.maxRounds = n
+          break
+        }
+        case '--max-tokens': {
+          const n = Number(value)
+          if (!Number.isInteger(n) || n < 1) {
+            return { ok: false, error: `--max-tokens 需要正整数，收到 ${value}` }
+          }
+          options.maxTokens = n
           break
         }
         case '--emit-patch':

@@ -14,26 +14,27 @@ export type Config = {
   model: string
   include: string[]
   exclude: string[]
-  /**
-   * 未显式配置时是 `undefined`，**不要在这里补默认值**。
-   *
-   * 默认轮数取决于"有没有实测证据"，而证据又来自**本配置里的 `profile` 字段**
-   * ——先把 maxRounds 定下来就成了鸡生蛋。所以默认值的决定推迟到
-   * `resolveConfig`，那时 profile 已经解析出来了。
-   */
-  maxRounds?: number
+  /** 已落定默认值，下游不必再判 undefined */
+  maxRounds: number
+  /** 累计输入 token 上限。见 DEFAULT_MAX_TOKENS 的说明 */
+  maxTokens: number
   /** 相对项目根的 profile 路径，或绝对路径 */
   profile?: string
 }
 
-/** 完全解析后的配置：默认值都已落定，下游不必再判 undefined */
-export type ResolvedConfig = Config & { maxRounds: number }
+/*
+ * 这里曾经有个 `Config` / `ResolvedConfig` 的拆分：默认轮数取决于"有没有实测证据"，
+ * 而证据来自配置里的 `profile` 字段，于是默认值只能等 profile 解析出来之后才定。
+ * 现在默认值与证据无关（轮数统一为兜底、真正的上限是 token 预算），那个鸡生蛋没有了，
+ * 拆分也就失去了存在理由——留着只会多一个类型和一个必须记得调的函数。
+ */
 
 export type ConfigFlags = {
   model?: string
   include?: string[]
   exclude?: string[]
   maxRounds?: number
+  maxTokens?: number
   profile?: string
 }
 
@@ -49,19 +50,29 @@ export type ConfigResult =
  */
 const DEFAULT_MODEL = 'anthropic/claude-sonnet-5'
 
-/** 有证据时给得多一些：每轮都在回答一个具体问题，收益衰减慢 */
-const ROUNDS_WITH_EVIDENCE = 10
-/** 无证据时是盲探，边际收益衰减快，给多了只是烧钱 */
-const ROUNDS_WITHOUT_EVIDENCE = 8
+/**
+ * 轮数上限。与 `maxTokens` 互补。
+ *
+ * 在小仓库上它通常**才是实际生效**的那个（每轮未缓存输入很小，100k 级预算根本用不完）。
+ * 它同时兜住"每次只读几行"的模型。大仓库上则由 token 预算先到。
+ *
+ * **它不再随有无证据变化。** 原设计让两者不同（有证据 10 / 无证据 8），但那个差异
+ * 是我猜的——"有证据时每轮都在回答具体问题所以可以多给"与"无证据时是盲探所以该少给"
+ * 两种论证都成立，我没有依据选边。而 token 预算成了真正的上限之后，这个差异也就不再
+ * 起作用了，所以去掉，避免留一个没有依据的旋钮。
+ */
+const DEFAULT_MAX_ROUNDS = 20
 
-export const defaultMaxRounds = (hasEvidence: boolean): number =>
-  hasEvidence ? ROUNDS_WITH_EVIDENCE : ROUNDS_WITHOUT_EVIDENCE
-
-/** 落定默认轮数。`hasEvidence` 由调用方在解析 profile 之后传入 */
-export const resolveConfig = (config: Config, hasEvidence: boolean): ResolvedConfig => ({
-  ...config,
-  maxRounds: config.maxRounds ?? defaultMaxRounds(hasEvidence),
-})
+/**
+ * 累计**未命中缓存的输入** token 上限。
+ *
+ * 400k 是按实测估的：一次 18 轮的运行累计约 70k，约合每轮 4k。所以 400k 在这个规模
+ * 的仓库上非常宽松（约 100 轮），实际生效的是 `maxRounds`。它主要防的是**大仓库**：
+ * 每轮新读进来的文件更大，未缓存输入随之变大，同样的预算会在更少轮数里耗尽。
+ *
+ * 两个上限互补，谁先到取决于仓库规模——见 `PlanLoopOptions.maxTokens` 的说明。
+ */
+const DEFAULT_MAX_TOKENS = 400_000
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -91,6 +102,16 @@ const parseFileConfig = (raw: unknown): FileConfig | string => {
     const v = stringArrayOf(raw.exclude, 'exclude')
     if (typeof v === 'string') return v
     out.exclude = v
+  }
+  if (raw.maxTokens !== undefined) {
+    if (
+      typeof raw.maxTokens !== 'number' ||
+      !Number.isInteger(raw.maxTokens) ||
+      raw.maxTokens < 1
+    ) {
+      return 'maxTokens 必须是正整数'
+    }
+    out.maxTokens = raw.maxTokens
   }
   if (raw.maxRounds !== undefined) {
     if (
@@ -127,6 +148,11 @@ const envOf = (env: Record<string, string | undefined>): ConfigFlags => {
     const n = Number(rounds)
     if (Number.isInteger(n) && n > 0) out.maxRounds = n
   }
+  const tokens = env.PERF_MAX_TOKENS
+  if (tokens !== undefined && tokens !== '') {
+    const n = Number(tokens)
+    if (Number.isInteger(n) && n > 0) out.maxTokens = n
+  }
   const profile = env.PERF_PROFILE
   if (profile !== undefined && profile !== '') out.profile = profile
   return out
@@ -136,6 +162,7 @@ const merge = (base: ConfigFlags, over: ConfigFlags): ConfigFlags => {
   const out: ConfigFlags = { ...base }
   if (over.model !== undefined) out.model = over.model
   if (over.maxRounds !== undefined) out.maxRounds = over.maxRounds
+  if (over.maxTokens !== undefined) out.maxTokens = over.maxTokens
   if (over.profile !== undefined) out.profile = over.profile
   if (over.include !== undefined) out.include = over.include
   if (over.exclude !== undefined) out.exclude = over.exclude
@@ -190,8 +217,9 @@ export const loadConfig = (input: LoadConfigInput): ConfigResult => {
     model: merged.model ?? DEFAULT_MODEL,
     include: merged.include ?? [],
     exclude: merged.exclude ?? [],
+    maxRounds: merged.maxRounds ?? DEFAULT_MAX_ROUNDS,
+    maxTokens: merged.maxTokens ?? DEFAULT_MAX_TOKENS,
   }
-  if (merged.maxRounds !== undefined) config.maxRounds = merged.maxRounds
   if (merged.profile !== undefined) config.profile = merged.profile
 
   if (origins.length > 0) notes.push(`覆盖来源：${origins.join('，')}`)

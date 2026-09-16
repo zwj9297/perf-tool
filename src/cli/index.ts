@@ -11,7 +11,7 @@ import { createInterface } from 'node:readline/promises'
 
 import { builtinModels } from '@earendil-works/pi-ai/providers/all'
 
-import { loadConfig, resolveConfig, type Config } from '../config/load.js'
+import { loadConfig, type Config } from '../config/load.js'
 import { detectProjectTarget } from '../context/detect.js'
 import { loadCpuProfile } from '../evidence/parse.js'
 import type { PerformanceEvidence } from '../evidence/types.js'
@@ -81,6 +81,7 @@ const prepare = async (options: CliOptions): Promise<Prepared | PrepareFailure> 
       ...(options.model === undefined ? {} : { model: options.model }),
       ...(options.profile === undefined ? {} : { profile: options.profile }),
       ...(options.maxRounds === undefined ? {} : { maxRounds: options.maxRounds }),
+      ...(options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens }),
       ...(options.include.length === 0 ? {} : { include: options.include }),
       ...(options.exclude.length === 0 ? {} : { exclude: options.exclude }),
     },
@@ -149,7 +150,6 @@ const runPlan = async (options: CliOptions): Promise<number> => {
     return prepared.exitCode
   }
 
-  // 先解 profile：轮数的默认值取决于它有没有
   let evidence: PerformanceEvidence | undefined
   if (prepared.config.profile !== undefined) {
     const profilePath = resolveProfilePath(prepared.root, prepared.config.profile, process.cwd())
@@ -165,18 +165,16 @@ const runPlan = async (options: CliOptions): Promise<number> => {
     evidence = parsed.evidence
   }
 
-  const config = resolveConfig(prepared.config, evidence !== undefined)
-
   const toolbox = createToolbox({
     projectRoot: prepared.root,
-    ...(config.include.length === 0 ? {} : { include: config.include }),
-    ...(config.exclude.length === 0 ? {} : { exclude: config.exclude }),
+    ...(prepared.config.include.length === 0 ? {} : { include: prepared.config.include }),
+    ...(prepared.config.exclude.length === 0 ? {} : { exclude: prepared.config.exclude }),
   })
 
   const outcome = await runPlanCommand(
     {
       projectRoot: prepared.root,
-      config,
+      config: prepared.config,
       target: detectProjectTarget(prepared.root),
       ...(evidence === undefined ? {} : { evidence }),
     },

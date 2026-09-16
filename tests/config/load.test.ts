@@ -4,7 +4,7 @@ import { join } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
-import { CONFIG_FILE, defaultMaxRounds, loadConfig, resolveConfig } from '../../src/config/load.js'
+import { CONFIG_FILE, loadConfig } from '../../src/config/load.js'
 
 const withConfig = (content: string | undefined): { dir: string; clean: () => void } => {
   const dir = mkdtempSync(join(tmpdir(), 'perf-cfg-'))
@@ -29,8 +29,9 @@ describe('优先级：flag > env > 文件 > 默认', () => {
       expect(config.model).toBe('anthropic/claude-sonnet-5')
       expect(config.include).toEqual([])
       expect(config.exclude).toEqual([])
-      // 未显式配置时 maxRounds 保持 undefined，由 resolveConfig 落定
-      expect(config.maxRounds).toBeUndefined()
+      // 默认值在 loadConfig 里就落定，下游不必再判 undefined
+      expect(config.maxRounds).toBe(20)
+      expect(config.maxTokens).toBe(400_000)
     } finally {
       clean()
     }
@@ -48,7 +49,7 @@ describe('优先级：flag > env > 文件 > 默认', () => {
     )
     try {
       const { config } = load(dir, { env: {} })
-      expect(config).toEqual({
+      expect(config).toMatchObject({
         model: 'file/model',
         include: ['src/**'],
         exclude: ['**/*.test.ts'],
@@ -155,15 +156,40 @@ describe('文件内容非法时要报出人话', () => {
   })
 })
 
-describe('轮数默认值取决于有没有证据', () => {
-  it('有证据时给得更多（每轮都在回答具体问题，衰减慢）', () => {
-    expect(defaultMaxRounds(true)).toBeGreaterThan(defaultMaxRounds(false))
+describe('上限的默认值与覆盖', () => {
+  it('默认轮数是宽松兜底，token 预算才是主上限', () => {
+    const { dir, clean } = withConfig(undefined)
+    try {
+      const { config } = load(dir, { env: {} })
+      // 轮数给得宽松（它只是兜底），成本由 token 预算封顶
+      expect(config.maxRounds).toBeGreaterThanOrEqual(20)
+      expect(config.maxTokens).toBe(400_000)
+    } finally {
+      clean()
+    }
   })
 
-  it('resolveConfig 落定默认值，且不覆盖显式配置', () => {
-    const base = { model: 'm', include: [], exclude: [] }
-    expect(resolveConfig(base, false).maxRounds).toBe(defaultMaxRounds(false))
-    expect(resolveConfig(base, true).maxRounds).toBe(defaultMaxRounds(true))
-    expect(resolveConfig({ ...base, maxRounds: 3 }, true).maxRounds).toBe(3)
+  it('maxTokens 可由文件 / env / flag 覆盖，优先级不变', () => {
+    const { dir, clean } = withConfig(JSON.stringify({ maxTokens: 1000 }))
+    try {
+      expect(load(dir, { env: {} }).config.maxTokens).toBe(1000)
+      expect(load(dir, { env: { PERF_MAX_TOKENS: '2000' } }).config.maxTokens).toBe(2000)
+      expect(load(dir, { env: {}, flags: { maxTokens: 3000 } }).config.maxTokens).toBe(3000)
+    } finally {
+      clean()
+    }
+  })
+
+  it('maxTokens 非法时报错', () => {
+    for (const bad of [0, -1, 1.5, '400000']) {
+      const { dir, clean } = withConfig(JSON.stringify({ maxTokens: bad }))
+      try {
+        const r = loadConfig({ projectRoot: dir, env: {} })
+        expect(r.ok).toBe(false)
+        expect(r.ok === false && r.detail).toContain('maxTokens')
+      } finally {
+        clean()
+      }
+    }
   })
 })

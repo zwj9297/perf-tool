@@ -10,7 +10,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import type { ResolvedConfig } from '../config/load.js'
+import type { Config } from '../config/load.js'
 import type { ProjectTarget } from '../context/detect.js'
 import type { PerformanceEvidence } from '../evidence/types.js'
 import { runPlanLoop, type PlanLoopResult, type TraceEntry } from '../plan/loop.js'
@@ -32,8 +32,8 @@ export type PlanCommandDeps = {
 export type PlanCommandInput = {
   /** **已 realpath 归一化**的项目根 */
   projectRoot: string
-  /** 已落定默认值的配置，所以这里 maxRounds 一定是数字 */
-  config: ResolvedConfig
+  /** 已落定默认值的配置 */
+  config: Config
   target: ProjectTarget
   evidence?: PerformanceEvidence
 }
@@ -110,8 +110,11 @@ const failureHintOf = (reason: string): string => {
       return '模型调用失败。检查认证（各家的 API key 环境变量）与网络。'
     case 'unsafe-path':
       return '模型提交的计划引用了项目外的文件，已直接终止。这可能是提示被带偏的信号，建议看一下 trace。'
-    case 'rounds-exhausted':
-      return '探索预算用完但模型没有交卷。可以用 --max-rounds 放宽，或用 --model 换一个更守规矩的模型。'
+    case 'budget-exhausted':
+      return (
+        '探索预算用完但模型没有交卷。可以用 --max-tokens / --max-rounds 放宽，' +
+        '或用 --model 换一个更守规矩的模型。'
+      )
     case 'no-plan':
       return '模型既没调工具也没交卷。换个模型试试。'
     default:
@@ -137,7 +140,8 @@ export const runPlanCommand = async (
     `分析 ${input.target.language} 项目（${input.target.buildSystem ?? '构建系统未知'}）：${input.projectRoot}\n`,
   )
   deps.write(
-    `模型 ${input.config.model}，探索上限 ${input.config.maxRounds} 轮，` +
+    `模型 ${input.config.model}，探索上限 ${input.config.maxRounds} 轮 / ` +
+      `成本上限 ${Math.round(input.config.maxTokens / 1000)}k 输入 token，` +
       `证据：${hasEvidence ? '有实测 profile' : '无（静态分析）'}\n`,
   )
   deps.write('\n正在探索…\n')
@@ -148,6 +152,7 @@ export const runPlanCommand = async (
     systemPrompt,
     userMessage: userMessageOf(hasEvidence),
     maxRounds: input.config.maxRounds,
+    maxTokens: input.config.maxTokens,
     target: input.target,
     toolContext: { projectRoot: input.projectRoot },
     ...(input.evidence === undefined ? {} : { evidence: input.evidence }),

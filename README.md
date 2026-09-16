@@ -102,12 +102,17 @@ perf plan --profile .perf/profile.cpuprofile   # 提供实测数据，进入"基
 perf plan --model anthropic/claude-sonnet-5    # 临时指定模型
 perf plan --include 'src/**' --include 'lib/**' # 只分析匹配的文件（可重复）
 perf plan --exclude '**/*.test.ts'             # 排除匹配的文件（可重复）
-perf plan --max-rounds 12                      # 探索轮数上限
+perf plan --max-rounds 20                      # 探索轮数上限
+perf plan --max-tokens 400000                  # 累计未缓存输入 token 上限
 perf plan --json                               # 把计划以 JSON 打到标准输出（便于脚本消费）
 perf plan ../other-repo                        # 不在当前目录时指定目标
 ```
 
-环境变量：`PERF_MODEL` / `PERF_MAX_ROUNDS` / `PERF_PROFILE`。
+环境变量：`PERF_MODEL` / `PERF_MAX_ROUNDS` / `PERF_MAX_TOKENS` / `PERF_PROFILE`。
+
+**两个成本上限互补，谁先到取决于仓库规模。** `--max-rounds` 限制交换轮数；`--max-tokens` 限制**未命中缓存的输入** token。小仓库上每轮新内容少，轮数会先到；大仓库上每轮读进来的文件更大，token 预算会先到。
+
+（为什么量"未缓存输入"而不是"总上下文"：prompt 的前缀会被 provider 缓存，缓存命中那部分便宜得多，不该按全价计入成本。副作用是不支持缓存的供应商会更早用尽——那是安全的方向。）
 
 `perf run` 的 flag：
 
@@ -140,6 +145,7 @@ perf run ../other-repo                         # 不在当前目录时指定目�
   "model": "anthropic/claude-sonnet-5",
   "include": ["src/**/*.ts"],
   "exclude": ["**/*.test.ts", "dist/**"],
+  "maxTokens": 400000,
   "evidence": {
     "profile": ".perf/profile.cpuprofile"
   }

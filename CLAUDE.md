@@ -72,8 +72,9 @@ npx perf --help          # 验证 bin、ESM 加载、以及对 pi-ai 的运行�
 perf plan [path]                    # 只读，绝不修改目标项目
   1. 解析配置 + 定位目标项目根
   2. 校验 git 前置条件，归一化性能证据 → PerformanceEvidence | null
-  3. 只读工具探索循环（read_file / grep / glob / list_dir），有界
-     模型通过调用 submit_plan 收尾；触顶则把工具集收缩为只剩它
+  3. 只读工具探索循环（read_file / grep / glob / list_dir）
+     成本上限：maxTokens（未缓存输入）与 maxRounds 互补，谁先到取决于仓库规模
+     模型通过调用 submit_plan 收尾；到顶则把工具集收缩为只剩它，再给 2 轮收尾
   4. 计划落盘到 .perf/plan.json，工具轨迹落盘到 .perf/trace.json
 
 perf run                            # 写，逐个 step 提交
@@ -96,7 +97,7 @@ perf run                            # 写，逐个 step 提交
 - `evidence/` — profile 解析与归一化（`.cpuprofile` → `PerformanceEvidence`）。**已完成**（`parse.ts` + `types.ts`，93 个测试）。**四条硬约束，写错任何一条都会让模型优化错地方**：① 按 `(文件, 行)` 归因而非按函数名（V8 内联会让函数名指向错误的函数，实测真凶行被算到了调用者名下）；② `positionTicks[].line` 是 **1-based** 而 `callFrame.lineNumber` 是 **0-based**；③ 必须累加 `timeDeltas` 而非 `hitCount × 名义间隔`（实测差 24%）；④ 路径含 `node_modules` 段的**一律**算依赖，**不管它在不在项目根内**——只判"是否出根"会让根内的依赖热点进 `hotSpots`，模型就会去优化一个第三方包。详见设计文档 §6
 - `context/` — 目标项目探测（语言 / 构建系统），**已完成但比原设计小得多**：D3 选了 agentic 循环之后，"文件发现 / 相关性排序 / 上下文预算"整个不需要了，模型用工具自己发现。忽略规则也不在这里，在 `tools/ignore.ts`（单一来源）
 - `tools/` — 只读工具集 **已完成**：`paths.ts`（安全闸门）、`glob.ts`（匹配）、`ignore.ts`（忽略规则）、`toolbox.ts`（四个工具 + 参数校验），37 个测试。四条硬约束：① 所有访问过 `resolveInsideProject`，**先 `realpath` 再判 containment**——指向项目外的软链在字符串上看着完全合法；② **凭证文件必须四个工具一致地不可见也不可读**（只挡 `read_file` 会让 `list_dir` / `grep` / `glob` 泄露它们的存在）；③ 输出上限只在**我们因上限砍掉了本来能返回的内容**时才算 `truncated`——模型自己指定的范围被满足、或被文件末尾截住，都不算，那时提示"请缩小范围"是误导；④ 不 shell、不用 experimental 的 `fs.globSync`，glob 与参数校验全用 JS
-- `plan/` — **已完成**：`loop.ts`（有界探索循环）、`prompt.ts`（含证据有无的行为分叉）、`schema.ts`（`PlanDraft` + 校验）。循环只依赖 `providers/types.ts` 与 `tools/types.ts` 的窄接口，所以能用假 provider + 假 toolbox 测完（152 个测试中有 59 个属于这块）
+- `plan/` — **已完成**：`loop.ts`（有界探索循环）、`prompt.ts`（含证据有无的行为分叉）、`schema.ts`（`PlanDraft` + 校验）。循环只依赖 `providers/types.ts` 与 `tools/types.ts` 的窄接口，所以能用假 provider + 假 toolbox 测完。两条硬约束：① **token 预算量的是「未命中缓存的输入」**（pi-ai 的 `usage.input` 不含 cacheRead，实测每轮值非单调且末轮极小即为佐证），它与轮数上限**互补**、谁先到取决于仓库规模——不要以为 token 必然先到；② 收尾额度 `WRAP_UP_ROUNDS` **从触发那一刻算起**，写成 `maxRounds + WRAP_UP_ROUNDS` 在 token 提前触顶时会变成"最多再跑 maxRounds 轮"
 - `diff/` — diff 规范化（`normalize.ts`，只修结构）、应用（`apply.ts`，含唯一性预检与多文件拆分）。基于 `diff` 包，但 **recount 与唯一性检查必须自己写**，失败原因的分类与处置见设计文档 §2.6 ~ §2.8
 - `execute/` — **已完成**：`overlay.ts`（预测态快照）、`generate.ts`（逐 step 生成 + 重试）、`preview.ts`（合并 diff 与 patch 导出）、`apply.ts`（**唯一会写用户源码的地方**）。五条硬约束：① 生成按序叠加到 overlay，**step N 必须看到前 N-1 步的结果**（否则同一文件被多步触及时 diff 锚点会互相矛盾）；② 多文件段的 patch 要**先在暂存区全部试成功再写回**，否则半途失败会污染快照、后面每步都基于坏状态；③ 预览用「原始 → 最终」的合并 diff，**不是**把各步增量拼起来（那样拼不出能 `git apply` 的东西）；④ 应用前必须比对磁盘与 overlay 记下的原始内容，任何一处不符就拒绝——overlay 是**预测态**，用户在预览后改了文件，预测就不成立，写下去是**静默覆盖**；⑤ 判断 git 命令的结果必须看**退出码**：`rev-parse HEAD` 在空仓库里退出码 128 却把 `HEAD` 打到了 stdout，只看输出会把失败读成成功，前提条件随之形同虚设
   原设计里还规划过 `git/` 与 `report/` 两个模块。**都没有单独建**：git 的分支/提交/回退逻辑只有 `execute/apply.ts` 一个使用方，拆出去只会多一层无谓的间接；结果汇总目前就是 `cli/` 里的输出，等它长到需要复用再说。

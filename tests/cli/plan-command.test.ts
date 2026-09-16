@@ -70,6 +70,7 @@ const config = (over: Record<string, unknown> = {}) => ({
   include: [] as string[],
   exclude: [] as string[],
   maxRounds: 5,
+  maxTokens: 1_000_000,
   ...over,
 })
 

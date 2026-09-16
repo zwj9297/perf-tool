@@ -107,6 +107,7 @@ const baseOptions = (turns: ProviderTurn[], over: Record<string, unknown> = {}) 
       systemPrompt: 'sys',
       userMessage: '分析这个项目',
       maxRounds: 6,
+      maxTokens: 1_000_000,
       target: { root: '/proj', language: 'TypeScript' },
       toolContext: { projectRoot: '/proj' },
       ...over,
@@ -167,7 +168,7 @@ describe('轮数上限与触顶收窄工具集', () => {
     expect(conversations[2]?.tools.map((t) => t.name)).toEqual(['submit_plan'])
     // 触顶时注入的提示进了对话与轨迹
     expect(
-      conversations[2]?.messages.some((m) => m.role === 'user' && m.text.includes('预算')),
+      conversations[2]?.messages.some((m) => m.role === 'user' && m.text.includes('只能调用')),
     ).toBe(true)
     expect(r.ok).toBe(true)
   })
@@ -185,20 +186,21 @@ describe('轮数上限与触顶收窄工具集', () => {
     expect(rejected[0]?.kind === 'rejected' && rejected[0].issues).toContain('只能调用')
   })
 
-  it('触顶后坚持不交卷 → rounds-exhausted，且轮数被 WRAP_UP_ROUNDS 钉死', async () => {
+  it('触顶后坚持不交卷 → budget-exhausted，且轮数被 WRAP_UP_ROUNDS 钉死', async () => {
     // 给足 10 个响应；循环不该用完（maxRounds=2 + 2 轮收尾 = 最多 4 轮）
     const turns = Array.from({ length: 10 }, (_, i) => grepTurn(`p${i}`))
     const { options } = baseOptions(turns, { maxRounds: 2 })
     const r = await runPlanLoop(options)
 
     expect(r.ok).toBe(false)
-    expect(r.ok === false && r.reason).toBe('rounds-exhausted')
+    expect(r.ok === false && r.reason).toBe('budget-exhausted')
     expect(r.rounds).toBe(4)
   })
 
   it('预算内不触发收窄', async () => {
     const { options, conversations } = baseOptions([grepTurn('a'), submitTurn(goodDraft())], {
       maxRounds: 6,
+      maxTokens: 1_000_000,
     })
     await runPlanLoop(options)
     expect(conversations.every((c) => c.tools.length === 2)).toBe(true)
@@ -248,6 +250,7 @@ describe('截断必须显式告知模型', () => {
       systemPrompt: 's',
       userMessage: 'u',
       maxRounds: 4,
+      maxTokens: 1_000_000,
       target: { root: '/proj', language: 'ts' },
       toolContext: { projectRoot: '/proj' },
     })
@@ -305,6 +308,7 @@ describe('不认识的工具名与不说话的模型', () => {
       systemPrompt: 's',
       userMessage: 'u',
       maxRounds: 4,
+      maxTokens: 1_000_000,
       target: { root: '/proj', language: 'ts' },
       toolContext: { projectRoot: '/proj' },
     })
@@ -350,5 +354,86 @@ describe('轨迹完整性', () => {
     expect(kinds).toContain('toolResult')
     expect(kinds).toContain('rejected')
     expect(r.trace.filter((t) => t.kind === 'round')).toHaveLength(r.rounds)
+  })
+})
+
+describe('token 预算才是主上限', () => {
+  /**
+   * 轮数上限只是廉价兜底；真正在起作用的成本上限是累计输入 token。
+   *
+   * 为什么按 token 而不是按轮数：轮数上限会随仓库规模**反向**适应——仓库越大给越多
+   * 轮，而每轮的上下文也越大，总成本近似平方增长。token 预算自动朝正确方向适应：
+   * 仓库或文件越大，同样的预算在更少轮数里被耗尽。
+   */
+  it('累计输入超过预算 → 收尾（即使轮数远没用完）', async () => {
+    const { options, conversations } = baseOptions(
+      [
+        { ...grepTurn('a'), usage: { inputTokens: 600, outputTokens: 10 } },
+        { ...grepTurn('b'), usage: { inputTokens: 600, outputTokens: 10 } },
+        grepTurn('c'),
+        submitTurn(goodDraft()),
+      ],
+      { maxRounds: 50, maxTokens: 1000 },
+    )
+    const r = await runPlanLoop(options)
+
+    // 第 2 轮结束时累计 1200 > 1000 → 收尾
+    expect(conversations[2]?.tools.map((t) => t.name)).toEqual(['submit_plan'])
+    expect(
+      conversations[2]?.messages.some((m) => m.role === 'user' && m.text.includes('成本')),
+    ).toBe(true)
+    expect(r.ok).toBe(true)
+  })
+
+  it('预算充裕时不收尾（轮数也远没用完）', async () => {
+    const { options, conversations } = baseOptions(
+      [
+        { ...grepTurn('a'), usage: { inputTokens: 100, outputTokens: 10 } },
+        submitTurn(goodDraft()),
+      ],
+      { maxRounds: 50, maxTokens: 100_000 },
+    )
+    await runPlanLoop(options)
+    expect(conversations.every((c) => c.tools.length === 2)).toBe(true)
+  })
+
+  it('token 触顶且模型仍不交卷 → budget-exhausted，理由里点明是 token', async () => {
+    const turns = Array.from({ length: 8 }, (_, i) => ({
+      ...grepTurn(`t${i}`),
+      usage: { inputTokens: 600, outputTokens: 1 },
+    }))
+    const { options } = baseOptions(turns, { maxRounds: 50, maxTokens: 1000 })
+    const r = await runPlanLoop(options)
+
+    expect(r.ok).toBe(false)
+    expect(r.ok === false && r.reason).toBe('budget-exhausted')
+    expect(r.ok === false && r.message).toContain('token')
+  })
+
+  it('收尾额度从触发那一刻算起，不是从 maxRounds 算起', async () => {
+    // maxRounds=50 而 token 在第 2 轮用尽：收尾只该再给 2 轮（到第 4 轮为止），
+    // 而不是一路跑到第 52 轮。写成 `rounds < maxRounds + WRAP_UP_ROUNDS` 就会后者。
+    const turns = Array.from({ length: 40 }, (_, i) => ({
+      ...grepTurn(`z${i}`),
+      usage: { inputTokens: 600, outputTokens: 1 },
+    }))
+    const { options } = baseOptions(turns, { maxRounds: 50, maxTokens: 1000 })
+    const r = await runPlanLoop(options)
+    expect(r.rounds).toBe(4)
+
+    // 对照：轮数触顶时同样是「再给 2 轮」
+    const roundsTurns = Array.from({ length: 40 }, (_, i) => grepTurn(`y${i}`))
+    const rt = await runPlanLoop(baseOptions(roundsTurns, { maxRounds: 2 }).options)
+    expect(rt.rounds).toBe(4)
+  })
+
+  it('轮数兜底仍然生效（token 用得很省的模型不会被放开）', async () => {
+    const turns = Array.from({ length: 8 }, (_, i) => ({
+      ...grepTurn(`c${i}`),
+      usage: { inputTokens: 1, outputTokens: 1 },
+    }))
+    const { options } = baseOptions(turns, { maxRounds: 2, maxTokens: 10_000_000 })
+    const r = await runPlanLoop(options)
+    expect(r.ok === false && r.message).toContain('轮数')
   })
 })

@@ -9,8 +9,8 @@
  *
  * | 要求 | 在这里 |
  * | --- | --- |
- * | 轮数上限随有无证据而变 | 上限由调用方传入（有证据时问题更具体，可以多给） |
- * | 触顶把工具集收缩为只剩 submit_plan | `wrapUp`，且额外留 `WRAP_UP_ROUNDS` 轮收尾 |
+ * | 成本上有上限 | `maxTokens`（未命中缓存的输入）与 `maxRounds` 互补，谁先到取决于仓库规模 |
+ * | 触顶把工具集收缩为只剩 submit_plan | `wrapUp`；收尾额度 `WRAP_UP_ROUNDS` 轮，**从触发那一刻算起** |
  * | 重复工具调用检测与提示 | `seen`，命中即回填缓存并明说"你已经查过" |
  * | 完整轨迹落盘 | 每次回合、工具结果、拒绝、注入的提示都进 `trace` |
  */
@@ -64,8 +64,8 @@ export type PlanLoopFailure =
   | 'provider-failed'
   /** 模型试图引用项目外的文件。**不重试**，见下方说明 */
   | 'unsafe-path'
-  /** 预算用完且模型仍未交卷 */
-  | 'rounds-exhausted'
+  /** 预算用完（轮数或 token，哪一个先到）且模型仍未交卷 */
+  | 'budget-exhausted'
   /** 模型不调工具也不交卷（催过一次仍然如此） */
   | 'no-plan'
 
@@ -86,8 +86,31 @@ export type PlanLoopOptions = {
   systemPrompt: string
   /** 首条用户消息 */
   userMessage: string
-  /** 探索轮数上限。调用方按有无证据决定 */
+  /**
+   * 探索轮数上限。**这是廉价兜底，不是主要上限**——主要上限是 `maxTokens`。
+   *
+   * 一个失败得很便宜的模型（每次都只读几行、上下文很小）需要它来兜住；但正常情况
+   * 下 token 会先到顶。
+   */
   maxRounds: number
+  /**
+   * 累计**输入** token 上限。
+   *
+   * **这里的「输入」是未命中缓存的那部分。** pi-ai 的 `usage.input` 不含 cacheRead
+   * （缓存部分另计）。实测佐证：一次 18 轮运行里每轮的 input 是
+   * 1545 / 307 / 10016 / … / 169 / 160 / 258——**非单调、且末轮极小**。若它是"重发的
+   * 累积上下文"，就该单调递增。所以前缀被 provider 缓存了，只有新内容算作 input。
+   *
+   * 这反而让它更适合当成本上限：它量的是**新读进来的内容**。缓存命中的部分便宜得多，
+   * 不该按全价计入。副作用是同一个预算在不支持缓存的 provider 上会更早用尽（那里
+   * input 就是完整 prompt）——而那恰好是安全的方向。
+   *
+   * **它与 `maxRounds` 是互补的，谁先到取决于仓库**：小仓库上每轮新内容少，轮数兜底
+   * 会先到；大仓库上每轮读进来的文件更大，token 预算会先到。不要把它想成"token 总是
+   * 主上限"——那要看规模。（这一点我最初写错了：我以为 input 是总上下文、随轮数平方
+   * 增长，于是推出"token 必然先到"。实测否掉了这个推论。）
+   */
+  maxTokens: number
   /** 补全 `Plan` 用；不作为模型输出的一部分，见 schema.ts 的说明 */
   target: PlanTarget
   toolContext: ToolContext
@@ -125,7 +148,37 @@ export const runPlanLoop = async (options: PlanLoopOptions): Promise<PlanLoopRes
   let usage: ProviderUsage = { inputTokens: 0, outputTokens: 0 }
   let rounds = 0
   let wrapUp = false
+  /** 是哪一条上限触发的收尾。进提示、进轨迹、也进最终失败原因 */
+  let wrapUpReason: 'rounds' | 'tokens' | undefined
+  /** 收尾从第几轮开始。收尾额度从那一刻算起，见 roundLimit */
+  let wrapUpRound: number | undefined
   let nudged = false
+
+  /**
+   * 本轮之后还能不能再跑。
+   *
+   * **收尾额度必须从触发收尾那一刻算起，不能写成 `maxRounds + WRAP_UP_ROUNDS`。**
+   * 那个写法在轮数触发时恰好等价（`maxRounds + 2` 就是收尾额度），但 token 提前
+   * 触顶时就成了「最多再跑 maxRounds 轮」——例如 maxRounds=50 而 token 在第 2 轮
+   * 就用尽，收尾阶段能拖到第 52 轮。这是加 token 触发时引出的真 bug。
+   */
+  const roundLimit = (): number =>
+    wrapUpRound === undefined ? options.maxRounds + WRAP_UP_ROUNDS : wrapUpRound + WRAP_UP_ROUNDS
+
+  const beginWrapUp = (reason: 'rounds' | 'tokens'): void => {
+    wrapUp = true
+    wrapUpReason = reason
+    wrapUpRound = rounds
+    const note =
+      reason === 'rounds'
+        ? `探索轮数已达上限（${options.maxRounds} 轮）。从现在起只能调用 \`${SUBMIT_PLAN}\`。` +
+          `请基于已掌握的信息立即提交计划，并在 caveats 里说明哪些判断因此缺乏依据。`
+        : `本次探索的成本已达上限（累计输入约 ${Math.round(options.maxTokens / 1000)}k token）。` +
+          `从现在起只能调用 \`${SUBMIT_PLAN}\`。` +
+          `请基于已掌握的信息立即提交计划，并在 caveats 里说明哪些判断因此缺乏依据。`
+    trace.push({ kind: 'note', round: rounds, text: note })
+    messages.push({ role: 'user', text: note })
+  }
 
   const fail = (reason: PlanLoopFailure, message: string): PlanLoopResult => ({
     ok: false,
@@ -136,7 +189,7 @@ export const runPlanLoop = async (options: PlanLoopOptions): Promise<PlanLoopRes
     usage,
   })
 
-  while (rounds < options.maxRounds + WRAP_UP_ROUNDS) {
+  while (rounds < roundLimit()) {
     rounds++
 
     const turn = await options.provider.turn({
@@ -173,7 +226,10 @@ export const runPlanLoop = async (options: PlanLoopOptions): Promise<PlanLoopRes
 
     if (calls.length === 0) {
       if (wrapUp) {
-        return fail('rounds-exhausted', `探索预算（${options.maxRounds} 轮）用完，且模型没有交卷`)
+        return fail(
+          'budget-exhausted',
+          `探索预算已用完（${wrapUpReason === 'tokens' ? 'token' : '轮数'}先到顶），且模型没有交卷`,
+        )
       }
       if (nudged) {
         return fail('no-plan', `模型连续两轮既没调用工具也没调用 ${SUBMIT_PLAN}`)
@@ -301,18 +357,17 @@ export const runPlanLoop = async (options: PlanLoopOptions): Promise<PlanLoopRes
       return { ok: true, plan: submitted, trace, rounds, usage }
     }
 
-    if (!wrapUp && rounds >= options.maxRounds) {
-      wrapUp = true
-      const note =
-        `探索预算（${options.maxRounds} 轮）已用完。从现在起只能调用 \`${SUBMIT_PLAN}\`。` +
-        `请基于已掌握的信息立即提交计划，并在 caveats 里说明哪些判断因此缺乏依据。`
-      trace.push({ kind: 'note', round: rounds, text: note })
-      messages.push({ role: 'user', text: note })
+    if (!wrapUp) {
+      // 轮数是廉价兜底，token 才是主要上限——两者都查，谁先到算谁
+      if (rounds >= options.maxRounds) beginWrapUp('rounds')
+      else if (usage.inputTokens >= options.maxTokens) beginWrapUp('tokens')
     }
   }
 
   return fail(
-    'rounds-exhausted',
-    `探索预算用完（上限 ${options.maxRounds} 轮 + ${WRAP_UP_ROUNDS} 轮收尾）`,
+    'budget-exhausted',
+    wrapUpReason === 'tokens'
+      ? `成本上限已用完（累计输入超过 ${Math.round(options.maxTokens / 1000)}k token，另给了 ${WRAP_UP_ROUNDS} 轮收尾）`
+      : `探索轮数已用完（上限 ${options.maxRounds} 轮，另给了 ${WRAP_UP_ROUNDS} 轮收尾）`,
   )
 }

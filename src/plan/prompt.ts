@@ -95,7 +95,7 @@ export const buildSystemPrompt = (input: PromptInput): string => {
       `探索完成后调用 \`submit_plan\` 交卷。**不要在没有调用它的情况下结束**。`,
       ``,
       `边界：你只能读取项目内的文件（工具会拒绝越界路径），也不能执行任何命令。`,
-      `你有约 ${input.maxRounds} 轮探索预算。预算用完后工具会被收窄到只剩 \`submit_plan\`，届时请基于已掌握的信息立即交卷，并在 caveats 里说明哪些判断因此缺依据。`,
+      `你有约 ${input.maxRounds} 轮探索预算，另外还有一个总成本上限——两者任一用尽，工具都会被收窄到只剩 \`submit_plan\`。届时请基于已掌握的信息立即交卷，并在 caveats 里说明哪些判断因此缺依据。`,
     ]
       .filter((l) => l !== '')
       .join('\n'),
