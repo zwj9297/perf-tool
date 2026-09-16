@@ -122,6 +122,10 @@ export type GenerateResult = {
   error?: string
 }
 
+/** 进度行里的文本要短：模型有时会回一整段解释，原样打进进度会淹没关键信息 */
+const clip = (text: string, max = 160): string =>
+  text.length <= max ? text : `${text.slice(0, max)}…（共 ${text.length} 字符）`
+
 const LINE_CAP_NOTE = (rel: string, shown: number, total: number): string =>
   `\n…（${rel} 共 ${total} 行，这里只给了前 ${shown} 行。` +
   `若你要改的部分不在这段里，请说明需要先查看完整文件，不要凭猜测写 diff）`
@@ -313,8 +317,13 @@ export const generateEdits = async (options: GenerateOptions): Promise<GenerateR
 
       const call = calls.find((c) => c.name === SUBMIT_EDIT)
       if (call === undefined) {
-        // 既没提交 diff 也没声明跳过 —— 没遵守格式，重试
+        // 既没提交 diff 也没声明跳过 —— 没遵守格式，重试。
+        //
+        // **这条也必须有进度输出。** 早先只有 attemptApply 失败那一条会打印，于是
+        // 某步用了 3 次尝试时，用户只能看到"3 次"而看不到前两次为什么失败——实测
+        // 真的发生过（一次 run 里某步 3 次尝试只留下 1 条失败原因）。
         lastReason = turn.text.trim() === '' ? '模型没有调用任何工具' : turn.text.trim()
+        options.onProgress?.(`    第 ${attempts} 次尝试失败：${clip(lastReason)}\n`)
         continue
       }
 

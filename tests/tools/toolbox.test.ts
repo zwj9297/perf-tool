@@ -389,3 +389,32 @@ describe('glob 编译结果被缓存 —— 消除内层循环里的重复编译
     expect(matchesGlob('src/**/*.ts', 'src/a.js')).toBe(false)
   })
 })
+
+describe('过滤规则生效时，工具要提醒"没有结果 ≠ 不存在"', () => {
+  // 这条的由来是一次实测：模型把被 include 白名单挡住的 package.json 与 tsconfig.json
+  // 当成了"项目里没有这些东西"，并据此声明"构建配置与测试基线无法核实"。
+  const filtered = () => createToolbox({ projectRoot: proj, include: ['src/**/*.ts'] })
+
+  it('glob 无匹配时附上过滤说明', async () => {
+    const r = await filtered().run(call('glob', { pattern: '**/*.json' }), ctx)
+    expect(r.text).toContain('没有文件匹配')
+    expect(r.text).toContain('白名单')
+    expect(r.text).toContain('不等于"不存在"')
+  })
+
+  it('list_dir 的输出里也附上（"文件不存在"的推断就发生在这里）', async () => {
+    const r = await filtered().run(call('list_dir', {}), ctx)
+    expect(r.text).toContain('白名单')
+  })
+
+  it('grep 无匹配时附上', async () => {
+    const r = await filtered().run(call('grep', { pattern: 'NEEDLE_IN_LOG' }), ctx)
+    expect(r.text).toContain('没有匹配')
+    expect(r.text).toContain('白名单')
+  })
+
+  it('没有配过滤时不附（不制造噪音）', async () => {
+    const r = await run('glob', { pattern: '**/*.nope' })
+    expect(r.text).not.toContain('不等于"不存在"')
+  })
+})

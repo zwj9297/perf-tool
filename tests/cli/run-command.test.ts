@@ -539,3 +539,124 @@ describe('plan 文件里的路径也会被校验（它允许人工编辑，所�
     }
   })
 })
+
+describe('run 轨迹：诊断不该要求重跑一次', () => {
+  /**
+   * 由来：`plan` 一直有跑道迹，`run` 没有。代价是我为了拿到"每个 step 重试了几次"
+   * 不得不**重跑一次生成**——多花一轮 token。而这些数据本来就都在内存里。
+   */
+  const readTrace = (dir: string): Record<string, unknown> =>
+    JSON.parse(readFileSync(join(dir, OUTPUT_DIR, 'run-trace.json'), 'utf8')) as Record<
+      string,
+      unknown
+    >
+
+  it('preview 模式也落轨迹，步骤标为 generated', async () => {
+    const { dir, clean } = makeProject()
+    try {
+      await run(dir, [editTurn(patchFor('src/a.txt', A, 'bravo'))], planWith(dir, 1), {
+        mode: 'preview',
+      })
+      const t = readTrace(dir)
+      expect(t.mode).toBe('preview')
+      expect(t.outcome).toEqual({ ok: true, reason: 'preview-only' })
+      expect((t.steps as { status: string }[])[0]?.status).toBe('generated')
+    } finally {
+      clean()
+    }
+  })
+
+  it('应用成功时记录每个提交的 sha 与文件', async () => {
+    const { dir, clean } = makeProject()
+    try {
+      spawnSync('git', ['init'], { cwd: dir })
+      spawnSync('git', ['config', 'user.email', 't@t'], { cwd: dir })
+      spawnSync('git', ['config', 'user.name', 't'], { cwd: dir })
+      spawnSync('git', ['add', '.'], { cwd: dir })
+      spawnSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-m', 'init'], {
+        cwd: dir,
+      })
+
+      await run(dir, [editTurn(patchFor('src/a.txt', A, 'bravo'))], planWith(dir, 1), {
+        mode: 'apply',
+        confirm: true,
+      })
+      const t = readTrace(dir)
+      const steps = t.steps as { status: string; sha?: string; files: string[] }[]
+      expect(steps[0]?.status).toBe('committed')
+      expect(steps[0]?.sha).toMatch(/^[0-9a-f]{40}$/)
+      expect(steps[0]?.files).toEqual(['src/a.txt'])
+      expect(t.branch).toMatch(/^perf\//)
+    } finally {
+      clean()
+    }
+  })
+
+  it('验证未通过时标出是哪一步，并带上验证输出', async () => {
+    const { dir, clean } = makeProject()
+    try {
+      spawnSync('git', ['init'], { cwd: dir })
+      spawnSync('git', ['config', 'user.email', 't@t'], { cwd: dir })
+      spawnSync('git', ['config', 'user.name', 't'], { cwd: dir })
+      spawnSync('git', ['add', '.'], { cwd: dir })
+      spawnSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-m', 'init'], {
+        cwd: dir,
+      })
+
+      // 验证命令必定失败（exit 1），所以每个 step 都会被门控拦住
+      const chunks: string[] = []
+      const { runRunCommand } = await import('../../src/cli/run-command.js')
+      const outcome = await runRunCommand(
+        {
+          projectRoot: dir,
+          plan: planWith(dir, 1),
+          byStep: false,
+          mode: 'apply',
+          cwd: dir,
+          color: false,
+          verifyCommand: 'exit 1',
+          confirm: async () => true,
+          now: FIXED_NOW,
+        },
+        {
+          provider: scripted([editTurn(patchFor('src/a.txt', A, 'bravo'))]),
+          write: (t) => chunks.push(t),
+        },
+      )
+      expect(outcome.ok).toBe(false)
+
+      const t = readTrace(dir)
+      expect(t.verify).toBe('exit 1')
+      expect((t.steps as { status: string }[])[0]?.status).toBe('verify-failed')
+      expect(typeof t.verifyOutput).toBe('string')
+    } finally {
+      clean()
+    }
+  })
+
+  it('轨迹覆盖计划里的**每一个** step，包括被跳过的（带原因）', async () => {
+    const { dir, clean } = makeProject()
+    try {
+      await run(
+        dir,
+        [
+          editTurn(patchFor('src/a.txt', A, 'bravo')),
+          {
+            kind: 'tools',
+            calls: [{ id: 'k', name: 'skip_step', arguments: { reason: '不成立' } }],
+            text: '',
+          },
+        ],
+        planWith(dir, 2),
+        { mode: 'preview' },
+      )
+      const steps = readTrace(dir).steps as { status: string; reason?: string }[]
+      expect(steps).toHaveLength(2)
+      expect(steps[0]?.status).toBe('generated')
+      expect(steps[1]?.status).toBe('skipped')
+      expect(steps[1]?.reason).toContain('不成立')
+    } finally {
+      clean()
+    }
+  })
+})

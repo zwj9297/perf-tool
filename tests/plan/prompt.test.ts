@@ -124,3 +124,23 @@ describe('两种模式共有的部分', () => {
     expect(p).toContain('不能执行任何命令')
   })
 })
+
+describe('视野被裁剪时必须说清（否则"被过滤"会被推断成"不存在"）', () => {
+  it('配了 include/exclude 时明确列出规则，并点出"看不到 ≠ 不存在"', () => {
+    const p = buildSystemPrompt({ ...base, include: ['src/**'], exclude: ['**/*.test.ts'] })
+    expect(p).toContain('你的视野是被裁剪过的')
+    expect(p).toContain('src/**')
+    expect(p).toContain('**/*.test.ts')
+    expect(p).toContain('不等于"它不存在"')
+  })
+
+  it('没配过滤时不出这一节（避免无谓的 token 与噪音）', () => {
+    const p = buildSystemPrompt(base)
+    expect(p).not.toContain('你的视野是被裁剪过的')
+  })
+
+  it('只配 include 或只配 exclude 也各自成立', () => {
+    expect(buildSystemPrompt({ ...base, include: ['a/**'] })).toContain('白名单')
+    expect(buildSystemPrompt({ ...base, exclude: ['b/**'] })).toContain('排除在外')
+  })
+})

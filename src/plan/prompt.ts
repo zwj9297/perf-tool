@@ -14,6 +14,32 @@ export type PromptInput = {
   /** 有实测证据则进入"基于数据定位"模式；没有则进入"只报静态可判定问题"模式 */
   evidence?: PerformanceEvidence
   maxRounds: number
+  /**
+   * 生效中的 include / exclude 规则。
+   *
+   * 必须告诉模型，否则它会**把"被过滤掉"推断成"不存在"**——实测发生过：一次用
+   * include 白名单限定了源码目录的 plan 里，模型看到 glob/list_dir 列不出 package.json
+   * 与 tsconfig.json，就在计划摘要里写下"项目根目录下没有 package.json / tsconfig.json
+   * / tests 内容，所以构建配置与测试基线这几类判断我无法核实"。它基于一个错误前提
+   * 做了自我限制，而那完全是我们静默过滤造成的。
+   */
+  include?: readonly string[]
+  exclude?: readonly string[]
+}
+
+/** 视野被裁剪时必须说清——这是"静默过滤"那一类问题的模型侧对策 */
+const renderFilterSection = (include: readonly string[], exclude: readonly string[]): string => {
+  const lines: string[] = ['## 你的视野是被裁剪过的']
+  if (include.length > 0) lines.push(`只分析匹配以下白名单的文件：${include.join('、')}`)
+  if (exclude.length > 0) lines.push(`以下模式被排除在外：${exclude.join('、')}`)
+  lines.push('')
+  lines.push(
+    '工具只在这些范围内返回内容，项目自带的忽略规则（如 `.gitignore`、`node_modules`）也同时生效。',
+  )
+  lines.push(
+    '**所以"看不到某个文件"不等于"它不存在"。** 如果你要判断的东西（构建配置、依赖清单、测试、某段调用方）看起来缺失，请在结论里说明"它可能被过滤规则挡住了"或"我无法确认"，**不要基于"文件不存在"往下推理**。',
+  )
+  return lines.join('\n')
 }
 
 const pct = (v: number): string => `${(v * 100).toFixed(1)}%`
@@ -100,6 +126,12 @@ export const buildSystemPrompt = (input: PromptInput): string => {
       .filter((l) => l !== '')
       .join('\n'),
   )
+
+  const include = input.include ?? []
+  const exclude = input.exclude ?? []
+  if (include.length > 0 || exclude.length > 0) {
+    sections.push(renderFilterSection(include, exclude))
+  }
 
   sections.push(
     input.evidence === undefined

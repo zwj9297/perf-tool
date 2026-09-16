@@ -32,6 +32,7 @@ export const USAGE = `perf — 代码性能分析与优化
 产物:
   .perf/plan.json           优化计划（可人工编辑后再执行）
   .perf/trace.json          探索轨迹，计划不理想时用它诊断模型看了什么
+  .perf/run-trace.json      本次 run 里每个步骤的结局、重试次数与失败原因
 
 run 的前置条件（不满足会直接拒绝，不会静默降级）:
   - 目标是 git 仓库，且已跟踪文件没有未提交改动（未跟踪文件不影响）

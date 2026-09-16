@@ -44,7 +44,9 @@ npx perf run --emit-patch .perf/changes.patch   # 导出 patch，你自己 git a
 ```
 
 `plan` 会把结果写进 `.perf/plan.json`（可人工编辑）和 `.perf/trace.json`（探索轨迹，
-计划不理想时用它看模型读了什么）。
+计划不理想时用它看模型读了什么）。`run` 会把过程写进 `.perf/run-trace.json`——每个
+步骤的结局（已提交 / 验证未通过 / 主动跳过）、重试次数、失败原因、验证输出都在里面。
+出问题时先看这两个轨迹，不必重跑。
 
 建议在 `package.json` 里加上 script，省去每次输入：
 

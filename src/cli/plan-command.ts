@@ -134,6 +134,8 @@ export const runPlanCommand = async (
     ...(input.target.buildSystem === undefined ? {} : { buildSystem: input.target.buildSystem }),
     ...(input.evidence === undefined ? {} : { evidence: input.evidence }),
     maxRounds: input.config.maxRounds,
+    include: input.config.include,
+    exclude: input.config.exclude,
   })
 
   deps.write(

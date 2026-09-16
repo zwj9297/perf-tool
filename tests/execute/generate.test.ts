@@ -470,3 +470,45 @@ describe('provider 失败与用量', () => {
     }
   })
 })
+
+describe('"没提交 diff"这条失败路径也要有进度输出', () => {
+  it('每次都把失败原因打出来（否则用户只看到"3 次尝试"而不知为何）', async () => {
+    // 由来：一次真实 run 里某步用了 3 次尝试，日志里却只有 1 条失败原因——因为
+    // "模型没调 submit_edit"这条路径当时只设了 lastReason 给重试用，没有输出。
+    const { dir, clean } = makeProject({ 'src/a.txt': A })
+    try {
+      const { result, progress } = await run(
+        dir,
+        [
+          textTurn('我需要更多信息'),
+          textTurn('还是不知道'),
+          editTurn(patchFor('src/a.txt', A, 'bravo')),
+        ],
+        [{ id: 's1' }],
+      )
+      const joined = progress.join('')
+      expect(joined).toContain('第 1 次尝试失败')
+      expect(joined).toContain('第 2 次尝试失败')
+      expect(result.edits).toHaveLength(1) // 第 3 次交卷成功
+    } finally {
+      clean()
+    }
+  })
+
+  it('模型回的长文本被截断，不淹没进度行', async () => {
+    const long = 'x'.repeat(500)
+    const { dir, clean } = makeProject({ 'src/a.txt': A })
+    try {
+      const { progress } = await run(
+        dir,
+        [textTurn(long), textTurn(long), textTurn(long)],
+        [{ id: 's1' }],
+      )
+      const line = progress.find((l) => l.includes('次尝试失败')) ?? ''
+      expect(line).toContain('共 500 字符')
+      expect(line.length).toBeLessThan(300)
+    } finally {
+      clean()
+    }
+  })
+})

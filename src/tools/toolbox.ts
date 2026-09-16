@@ -77,6 +77,28 @@ const pathErrorText = (f: PathFailure): string => {
   }
 }
 
+/**
+ * 配置了 include / exclude 时，在"没有结果"的地方附一句提醒。
+ *
+ * 与提示词里那节重复是有意的：提示词只在开头说一次，而"看到空结果就推断文件不存在"
+ * 恰恰发生在工具返回的那一刻。实测过一次——模型把被白名单挡住的 package.json 与
+ * tsconfig.json 当成了"项目里没有这些东西"，并据此声明"构建配置与测试基线无法核实"。
+ *
+ * 只在空结果与 list_dir 上附（不是每次调用都附）：那两处才是这个推断的现场，而每次
+ * 都附会在每一轮里白烧 token。
+ */
+const filterNoteOf = (
+  include: readonly string[] | undefined,
+  exclude: readonly string[] | undefined,
+): string => {
+  const parts: string[] = []
+  if (include !== undefined && include.length > 0)
+    parts.push(`include 白名单 ${include.join('、')}`)
+  if (exclude !== undefined && exclude.length > 0) parts.push(`exclude 规则 ${exclude.join('、')}`)
+  if (parts.length === 0) return ''
+  return `\n（注意：本次生效的${parts.join(' 与 ')}会过滤结果——"没有结果"不等于"不存在"）`
+}
+
 const joinRel = (dir: string, name: string): string =>
   dir === '.' || dir === '' ? name : `${dir}/${name}`
 
@@ -245,6 +267,7 @@ const doGrep = (
   ctx: ToolContext,
   ig: IgnoreSet,
   caps: Caps,
+  filterNote: string,
 ): ToolResult => {
   const pattern = String(args.pattern ?? '')
   let re: RegExp
@@ -292,7 +315,7 @@ const doGrep = (
 
   if (hits.length === 0) {
     const suffix = walked.truncated ? '（注意：文件列表本身已被上限截断）' : ''
-    return { text: `没有匹配 ${JSON.stringify(pattern)} 的内容${suffix}` }
+    return { text: `没有匹配 ${JSON.stringify(pattern)} 的内容${suffix}${filterNote}` }
   }
   return {
     text: `匹配 ${hits.length} 处（扫描 ${scanned} 个文件）：\n${hits.join('\n')}`,
@@ -305,6 +328,7 @@ const doGlob = (
   ctx: ToolContext,
   ig: IgnoreSet,
   caps: Caps,
+  filterNote: string,
 ): ToolResult => {
   const pattern = String(args.pattern ?? '')
   if (pattern === '') return { text: 'pattern 不能为空', isError: true }
@@ -322,7 +346,7 @@ const doGlob = (
   }
 
   if (matched.length === 0) {
-    return { text: `没有文件匹配 ${JSON.stringify(pattern)}` }
+    return { text: `没有文件匹配 ${JSON.stringify(pattern)}${filterNote}` }
   }
   return {
     text: `${matched.length} 个文件匹配 ${JSON.stringify(pattern)}：\n${matched.join('\n')}`,
@@ -335,6 +359,7 @@ const doListDir = (
   ctx: ToolContext,
   ig: IgnoreSet,
   caps: Caps,
+  filterNote: string,
 ): ToolResult => {
   const input = typeof args.path === 'string' && args.path !== '' ? args.path : '.'
   const resolved = resolveInsideProject(ctx.projectRoot, input)
@@ -365,7 +390,7 @@ const doListDir = (
   const shown = capped ? kept.slice(0, caps.listEntries) : kept
   const suffix = capped ? `\n…还有 ${kept.length - shown.length} 项未列出` : ''
   return {
-    text: `目录 ${resolved.rel}（${kept.length} 项）：\n${shown.join('\n')}${suffix}`,
+    text: `目录 ${resolved.rel}（${kept.length} 项）：\n${shown.join('\n')}${suffix}${filterNote}`,
     truncated: capped,
   }
 }
@@ -381,6 +406,7 @@ export const createToolbox = (options: ToolboxOptions): Toolbox => {
     ...(options.exclude === undefined ? {} : { exclude: options.exclude }),
   })
   const caps: Caps = { ...DEFAULT_CAPS, ...options.caps }
+  const filterNote = filterNoteOf(options.include, options.exclude)
 
   return {
     specs: () => SPECS,
@@ -404,11 +430,11 @@ export const createToolbox = (options: ToolboxOptions): Toolbox => {
         case readFileSpec.name:
           return doReadFile(args, ctx, caps)
         case grepSpec.name:
-          return doGrep(args, ctx, ig, caps)
+          return doGrep(args, ctx, ig, caps, filterNote)
         case globSpec.name:
-          return doGlob(args, ctx, ig, caps)
+          return doGlob(args, ctx, ig, caps, filterNote)
         case listDirSpec.name:
-          return doListDir(args, ctx, ig, caps)
+          return doListDir(args, ctx, ig, caps, filterNote)
         default:
           // 循环在派发前已经拒过不认识的工具名，走到这里说明两边不一致
           return { text: `没有实现名为 ${call.name} 的工具`, isError: true }

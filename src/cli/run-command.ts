@@ -7,7 +7,7 @@
  * 否则用户读完 diff 点了 y 才被告知工作区是脏的，那次确认白问。
  */
 import { spawnSync } from 'node:child_process'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
 
 import {
@@ -84,6 +84,94 @@ export type RunCommandOutcome =
   | { ok: false; reason: string; message: string }
 
 export type PlanLoad = { ok: true; plan: Plan } | { ok: false; reason: string; message: string }
+
+export const RUN_TRACE_FILE = 'run-trace.json'
+
+/** 每个 step 在这一次运行里的结局。诊断时要回答的第一个问题就是"它到底走到哪一步" */
+export type StepTrace = {
+  id: string
+  title: string
+  status: 'committed' | 'verify-failed' | 'generated' | 'skipped' | 'not-generated'
+  attempts: number
+  files: string[]
+  sha?: string
+  reason?: string
+}
+
+export type RunTrace = {
+  plan: { summary: string; steps: number; grounded: boolean }
+  mode: 'apply' | 'preview'
+  verify?: string
+  branch?: string
+  usage?: { inputTokens: number; outputTokens: number }
+  steps: StepTrace[]
+  outcome: { ok: boolean; reason?: string }
+  /** 验证未通过时的原始输出（截断后的），失败原因通常就在其中 */
+  verifyOutput?: string
+}
+
+const buildStepTraces = (
+  plan: Plan,
+  generated: GenerateResult | undefined,
+  applied: { commits: readonly { stepId: string; sha: string; files: string[] }[] } | undefined,
+): StepTrace[] => {
+  const commitByStep = new Map((applied?.commits ?? []).map((c) => [c.stepId, c]))
+  const editByStep = new Map((generated?.edits ?? []).map((e) => [e.stepId, e]))
+  const skippedByStep = new Map((generated?.skipped ?? []).map((s) => [s.stepId, s]))
+
+  return plan.steps.map((step) => {
+    const base = { id: step.id, title: step.title }
+    const commit = commitByStep.get(step.id)
+    if (commit !== undefined) {
+      return {
+        ...base,
+        status: 'committed' as const,
+        attempts: editByStep.get(step.id)?.attempts ?? 0,
+        files: [...commit.files],
+        sha: commit.sha,
+      }
+    }
+    const edit = editByStep.get(step.id)
+    if (edit !== undefined) {
+      // 生成了却没提交，只可能是验证未通过（applyEdits 一遇失败就停）；
+      // 或者本次是 preview 模式，压根没走应用
+      const isVerifyFailure = applied !== undefined
+      return {
+        ...base,
+        status: isVerifyFailure ? ('verify-failed' as const) : ('generated' as const),
+        attempts: edit.attempts,
+        files: [...edit.files],
+        ...(isVerifyFailure ? { reason: '未通过逐 step 验证' } : {}),
+      }
+    }
+    const skipped = skippedByStep.get(step.id)
+    if (skipped !== undefined) {
+      return {
+        ...base,
+        status: 'skipped' as const,
+        attempts: skipped.attempts,
+        files: [],
+        reason: skipped.reason,
+      }
+    }
+    return { ...base, status: 'not-generated' as const, attempts: 0, files: [] }
+  })
+}
+
+/**
+ * 落轨迹。
+ *
+ * `plan` 一直都有跑道迹，而 `run` 没有——代价是我为了拿到"每个 step 重试了几次"
+ * 不得不**重跑一次生成**（多花了一轮 token）。诊断要回答的问题（哪一步失败、
+ * 重试几次、为什么、验证输出了什么）本来就都在内存里，写下来几乎不要成本。
+ */
+const persistRunTrace = (projectRoot: string, trace: RunTrace): string => {
+  const dir = join(projectRoot, OUTPUT_DIR)
+  mkdirSync(dir, { recursive: true })
+  const path = join(dir, RUN_TRACE_FILE)
+  writeFileSync(path, `${JSON.stringify(trace, null, 2)}\n`, 'utf8')
+  return path
+}
 
 /**
  * 读取并校验 `.perf/plan.json`。
@@ -238,6 +326,34 @@ export const runRunCommand = async (
     }
   }
 
+  const traceBase = {
+    plan: {
+      summary: input.plan.summary,
+      steps: input.plan.steps.length,
+      grounded: input.plan.grounded,
+    },
+    mode: input.mode,
+    ...(input.verifyCommand === undefined ? {} : { verify: input.verifyCommand }),
+    usage: result.usage,
+  }
+  const writeTrace = (
+    applied:
+      | {
+          commits: readonly { stepId: string; sha: string; files: string[] }[]
+          branch?: string
+          verifyOutput?: string
+        }
+      | undefined,
+    outcome: { ok: boolean; reason?: string },
+  ): string =>
+    persistRunTrace(input.projectRoot, {
+      ...traceBase,
+      ...(applied?.branch === undefined ? {} : { branch: applied.branch }),
+      steps: buildStepTraces(input.plan, result, applied),
+      outcome,
+      ...(applied?.verifyOutput === undefined ? {} : { verifyOutput: applied.verifyOutput }),
+    })
+
   const diffs = buildMergedDiffs(result.merged)
 
   if (input.byStep && result.edits.length > 0) {
@@ -292,6 +408,8 @@ export const runRunCommand = async (
           ? '没有可应用的改动。\n'
           : '想应用：去掉 `--dry-run`。想自己动手：加 `--emit-patch <文件>` 后 `git apply`。\n'),
     )
+    const tracePath = writeTrace(undefined, { ok: true, reason: 'preview-only' })
+    deps.write(`轨迹已写入 ${tracePath}\n`)
     return { ok: true, ...summary, applied: false }
   }
 
@@ -334,6 +452,7 @@ export const runRunCommand = async (
   })
 
   if (!applied.ok) {
+    const tracePath = writeTrace(applied, { ok: false, reason: applied.reason })
     deps.write(`\n应用失败（${applied.reason}）：${applied.message}\n`)
     if (applied.commits.length > 0) {
       deps.write(`\n已完成的提交（${applied.commits.length} 个）：\n`)
@@ -341,6 +460,8 @@ export const runRunCommand = async (
         deps.write(`  ${c.sha.slice(0, 8)}  ${c.title}\n`)
       }
     }
+    // 失败时尤其要给出轨迹位置：那里面记着每个 step 的结局与验证输出
+    deps.write(`轨迹已写入 ${tracePath}\n`)
     return { ok: false, reason: applied.reason, message: applied.message }
   }
 
@@ -354,6 +475,8 @@ export const runRunCommand = async (
       `  git reset --hard ${applied.startSha.slice(0, 8)}\n` +
       `  git branch -D ${applied.branch}\n`,
   )
+  const tracePath = writeTrace(applied, { ok: true })
+  deps.write(`轨迹已写入 ${tracePath}\n`)
 
   return {
     ok: true,
