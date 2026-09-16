@@ -1,3 +1,13 @@
 {
-  "cSpell.words": ["cpuprofile", "perftoolrc", "perftool", "nodenext"]
+  "cSpell.words": [
+    "cpuprofile",
+    "earendil",
+    "genai",
+    "jsdiff",
+    "nodenext",
+    "perftool",
+    "perftoolrc",
+    "Qwen",
+    "realpath"
+  ]
 }
