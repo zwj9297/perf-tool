@@ -136,9 +136,17 @@ type Step = {
   title: string
   rationale: string // 为什么这里判定为瓶颈
   files: string[] // 一律相对目标项目根
+  /**
+   * 结构化的位置。**`--runs N` 的合并前提**：判定"两轮说的是不是同一个问题"
+   * 必须能机械比对，而 `files` + rationale 里的散文行号做不到——实测过
+   * `checkin.ts` 上同时存在三条独立发现。
+   * ⏳ 随 --runs 一起实现，见 design.md §2.12。
+   */
+  locus?: { file: string; range?: [number, number] }
   kind: 'refactor' | 'algorithmic' | 'config' | 'dependency' | 'other'
   risk: 'low' | 'medium' | 'high'
   expectedImpact?: string // 仅在有实测证据时给出，见上
+  runCount?: number // 出现在几轮里；仅 --runs > 1 时有值。⏳ 尚未实现
 }
 
 // PerformanceEvidence / HotSpot 的定义见 docs/design.md §5。
@@ -183,6 +191,7 @@ type Step = {
 - **两条命令都端到端可用了**：`perf plan` 与 `perf run`（生成 → 预览 → 确认 → 落盘提交）。集成测试覆盖真 git（含 `git apply --check`）与真文件系统。
 - **`tools/` 的已知取舍**：走树时**跳过符号链接**（所以目录软链永远走不出项目根，代价是软链文件不会被枚举），只读**项目根**的 `.gitignore`（嵌套的 `.gitignore` 不生效）。这两条都是刻意的，改动前先想清楚。
 - **`execute/` 生成阶段没有工具**。模型只能看到 `step.files` 的内容，不能自己再读调用点，而 plan 阶段有完整只读工具集。**接上是自然的下一步增强**，尤其是 step 需要参考调用者时。
+- **发现集合不可复现**（实测四轮，无一条出现在全部四轮）——单次 plan 给出的是问题的一个子集。缓解手段是 `--runs N` 跑多轮并合并，设计见 design.md §2.12，**尚未实现**。
 - **验证是 opt-in 的**：`verify` 命令写在配置里、由 `--verify` 武装。这个"配置提供 + flag 武装"的拆分是安全要求，不是设计洁癖——`.perftoolrc.json` 随仓库分发，配置里写了命令不等于用户同意执行它。`--yes` 不隐含 `--verify`。
 - **新建 / 删除文件的 patch 暂不支持**（`diff/` 返回 `unsupported-file-op`）。模型确实会产出这类 patch（典型如"把这段逻辑抽成新文件"）。要么让 `plan/` 在 prompt 里明确禁止，要么让 `execute/` 跳过并计入报告——**目前两者都还没做**。
 - **命令面**：`plan` / `run` 为核心。`init`（写入配置）与 `report`（历史结果与 diff 查看）为后续补充。
